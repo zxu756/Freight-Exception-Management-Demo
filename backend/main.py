@@ -60,12 +60,13 @@ async def health_check():
     }
 
 
-# Import and include routers (will be created next)
-# from routers import exceptions, shipments, decisions, demo
-# app.include_router(exceptions.router, prefix=settings.api_prefix, tags=["exceptions"])
-# app.include_router(shipments.router, prefix=settings.api_prefix, tags=["shipments"])
-# app.include_router(decisions.router, prefix=settings.api_prefix, tags=["decisions"])
-# app.include_router(demo.router, prefix=settings.api_prefix, tags=["demo"])
+# Import and include routers
+from routers import exceptions, shipments, decisions, demo
+
+app.include_router(exceptions.router, prefix=settings.api_prefix, tags=["exceptions"])
+app.include_router(shipments.router, prefix=settings.api_prefix, tags=["shipments"])
+app.include_router(decisions.router, prefix=settings.api_prefix, tags=["decisions"])
+app.include_router(demo.router, prefix=settings.api_prefix, tags=["demo"])
 
 
 if __name__ == "__main__":
