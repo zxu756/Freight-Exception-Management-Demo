@@ -1,5 +1,6 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Dashboard from './components/Dashboard';
+import CaseDetail from './components/CaseDetail';
 import './index.css';
 
 function App() {
@@ -7,7 +8,7 @@ function App() {
     <Router>
       <Routes>
         <Route path="/" element={<Dashboard />} />
-        <Route path="/case/:caseNumber" element={<div className="p-8">Case detail page coming soon...</div>} />
+        <Route path="/case/:caseNumber" element={<CaseDetail />} />
       </Routes>
     </Router>
   );
