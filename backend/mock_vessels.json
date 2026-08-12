@@ -1,0 +1,104 @@
+[
+  {
+    "vesselName": "Southern Star",
+    "voyageNumber": "V2024000",
+    "imo": "IMO9000000",
+    "portCode": "NZLYT",
+    "eta": "2026-08-18T12:42:45.743019",
+    "etd": "2026-08-21T12:42:45.743019",
+    "status": "Departed",
+    "berthLocation": "Berth 7",
+    "containerCount": 125
+  },
+  {
+    "vesselName": "Pacific Navigator",
+    "voyageNumber": "V2024001",
+    "imo": "IMO9000001",
+    "portCode": "NZWLG",
+    "eta": "2026-08-15T04:42:45.743028",
+    "etd": "2026-08-18T04:42:45.743028",
+    "status": "Arrived",
+    "berthLocation": "Berth 11",
+    "containerCount": 157
+  },
+  {
+    "vesselName": "Kiwi Express",
+    "voyageNumber": "V2024002",
+    "imo": "IMO9000002",
+    "portCode": "NZAKL",
+    "eta": "2026-08-17T17:42:45.743033",
+    "etd": "2026-08-20T17:42:45.743033",
+    "status": "Delayed",
+    "berthLocation": "Berth 8",
+    "containerCount": 105,
+    "originalEta": "2026-08-16T01:42:45.743033",
+    "delayReason": "Port congestion",
+    "delayHours": 40.0
+  },
+  {
+    "vesselName": "Tasman Trader",
+    "voyageNumber": "V2024003",
+    "imo": "IMO9000003",
+    "portCode": "NZTRG",
+    "eta": "2026-08-13T11:42:45.743042",
+    "etd": "2026-08-15T11:42:45.743042",
+    "status": "Expected",
+    "berthLocation": "Berth 12",
+    "containerCount": 479
+  },
+  {
+    "vesselName": "ANL Whangarei",
+    "voyageNumber": "V2024004",
+    "imo": "IMO9000004",
+    "portCode": "NZWLG",
+    "eta": "2026-08-11T11:42:45.743046",
+    "etd": "2026-08-14T11:42:45.743046",
+    "status": "Berthed",
+    "berthLocation": "Berth 4",
+    "containerCount": 318
+  },
+  {
+    "vesselName": "Maersk Eindhoven",
+    "voyageNumber": "V2024005",
+    "imo": "IMO9000005",
+    "portCode": "NZTRG",
+    "eta": "2026-08-13T02:42:45.743050",
+    "etd": "2026-08-16T02:42:45.743050",
+    "status": "Arrived",
+    "berthLocation": "Berth 5",
+    "containerCount": 107
+  },
+  {
+    "vesselName": "MSC Amsterdam",
+    "voyageNumber": "V2024006",
+    "imo": "IMO9000006",
+    "portCode": "NZLYT",
+    "eta": "2026-08-12T00:42:45.743055",
+    "etd": "2026-08-14T00:42:45.743055",
+    "status": "Arrived",
+    "berthLocation": "Berth 7",
+    "containerCount": 125
+  },
+  {
+    "vesselName": "CMA CGM Libra",
+    "voyageNumber": "V2024007",
+    "imo": "IMO9000007",
+    "portCode": "NZTRG",
+    "eta": "2026-08-14T22:42:45.743059",
+    "etd": "2026-08-16T22:42:45.743059",
+    "status": "Departed",
+    "berthLocation": "Berth 3",
+    "containerCount": 445
+  },
+  {
+    "vesselName": "COSCO Wellington",
+    "voyageNumber": "V2024008",
+    "imo": "IMO9000008",
+    "portCode": "NZTRG",
+    "eta": "2026-08-11T10:42:45.743063",
+    "etd": "2026-08-14T10:42:45.743063",
+    "status": "Departed",
+    "berthLocation": "Berth 10",
+    "containerCount": 145
+  }
+]
