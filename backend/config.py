@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     auto_resolve_max_value: float = 5000.0  # Max cargo value for auto-resolve
     high_risk_threshold: int = 60  # Risk score threshold for high risk
 
+    # Weather API
+    weather_api_key: str = "37Y5H59434B8AYDHSRRFSBBFH"  # Visual Crossing API key
+    weather_api_enabled: bool = True
+
     class Config:
         env_file = ".env"
         case_sensitive = False
