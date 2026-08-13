@@ -46,6 +46,10 @@ def _migrate_ml_fields():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN predicted_downstream_impact TEXT"))
             if "recovery_cost" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN recovery_cost FLOAT"))
+            if "recommended_action" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN recommended_action VARCHAR(50)"))
+            if "recommendation_reason" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN recommendation_reason TEXT"))
 
 
 @asynccontextmanager
@@ -128,7 +132,7 @@ async def health_check():
 
 
 # Import and include routers
-from routers import exceptions, shipments, decisions, demo, air_cargo, road_freight, sea_freight
+from routers import exceptions, shipments, decisions, demo, air_cargo, road_freight, sea_freight, ask
 
 app.include_router(exceptions.router, prefix=settings.api_prefix, tags=["exceptions"])
 app.include_router(shipments.router, prefix=settings.api_prefix, tags=["shipments"])
@@ -137,6 +141,7 @@ app.include_router(demo.router, prefix=settings.api_prefix, tags=["demo"])
 app.include_router(air_cargo.router, prefix=settings.api_prefix, tags=["air_cargo"])
 app.include_router(road_freight.router, prefix=settings.api_prefix, tags=["road_freight"])
 app.include_router(sea_freight.router, prefix=settings.api_prefix, tags=["sea_freight"])
+app.include_router(ask.router, prefix=settings.api_prefix, tags=["ask"])
 
 
 if __name__ == "__main__":

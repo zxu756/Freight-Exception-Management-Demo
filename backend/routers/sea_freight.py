@@ -221,6 +221,8 @@ async def get_container_detail(container_number: str, db: Session = Depends(get_
                 "root_cause_category": x.root_cause_category,
                 "predicted_downstream_impact": x.predicted_downstream_impact,
                 "recovery_cost": x.recovery_cost,
+                "recommended_action": x.recommended_action,
+                "recommendation_reason": x.recommendation_reason,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
@@ -272,6 +274,8 @@ async def get_sea_exceptions(
                 "root_cause_category": x.root_cause_category,
                 "predicted_downstream_impact": x.predicted_downstream_impact,
                 "recovery_cost": x.recovery_cost,
+                "recommended_action": x.recommended_action,
+                "recommendation_reason": x.recommendation_reason,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions

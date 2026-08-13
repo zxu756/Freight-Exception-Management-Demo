@@ -190,6 +190,47 @@ def estimate_recovery_cost(exception_type, cargo_value):
     base = RECOVERY_BASE_COST.get(exception_type, 300)
     return round(base + (cargo_value or 0) * 0.01, 2)
 
+
+# 每个恢复行动的基础成本（NZD，用于 AI 选择最佳行动）
+ACTION_COST = {
+    "priority_loading": 200, "rebook_next_service": 400, "switch_route_or_mode": 600,
+    "customer_contingency": 100, "inspection": 300, "repacking": 400, "salvage": 500,
+    "replace_or_reship": 1500, "insurance_claim": 200, "corrected_routing": 300,
+    "intercept": 400, "transfer_correct_lane": 500, "relabel_or_rebook": 300,
+    "submit_documents": 100, "duty_payment": 300, "coordinate_inspection": 400,
+    "broker_escalation": 200, "network_trace": 300, "stop_wrong_delivery": 200,
+    "replacement": 1500, "alternate_supply": 800, "correct_instructions": 50,
+    "new_appointment": 100, "redelivery": 150, "depot_collection": 100,
+    "correct_master_data": 50, "resend_event": 50, "integration_ticket": 100,
+    "manual_milestone": 50, "substitute_equipment": 800, "split_or_prioritise": 400,
+    "rebook_or_reroute": 500, "expedite_critical": 900, "monitor": 0,
+}
+
+
+def select_best_recovery(category, cargo_value, customer_tier):
+    """Select the best pre-approved recovery action and explain why.
+
+    For low-value shipments the AI prefers the lowest-cost action; for
+    high-value / VIP customers it prefers the most decisive (expedite) action.
+    """
+    actions = RECOVERY_PLAYBOOK.get(category, ["monitor"])
+    costs = {a: ACTION_COST.get(a, 200) for a in actions}
+    high_value = (cargo_value or 0) >= 50000 or customer_tier in ("VIP", "high")
+
+    if high_value and "expedite_critical" in actions:
+        best = "expedite_critical"
+    elif high_value and "rebook_next_service" in actions:
+        best = "rebook_next_service"
+    else:
+        best = min(actions, key=lambda a: costs[a])
+
+    reason = (
+        f"Selected '{best}' (est. ${costs.get(best, 200)}) among {len(actions)} "
+        f"pre-approved options for a ${(cargo_value or 0):,.0f} shipment to a "
+        f"{customer_tier or 'standard'} customer."
+    )
+    return best, reason
+
 # Cold-start representative templates (used until the classifier has learned).
 SECTION_TEMPLATES = {
     "Delay": [

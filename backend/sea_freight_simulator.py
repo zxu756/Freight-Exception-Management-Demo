@@ -30,8 +30,9 @@ from sea_freight_seed import (
 )
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
 from config import settings
-from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost
+from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery
 from notification_models import ExceptionNotification, build_customer_notification
+from llm_client import enhance_diagnosis
 from anomaly_detector import detector
 
 # 活跃窗口：为 arrival 落在该窗口内的船生成集装箱
@@ -586,6 +587,9 @@ class SeaFreightSimulator:
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
         cost = estimate_recovery_cost(exc_type, container.declared_value_nzd)
+        best_action, action_reason = select_best_recovery(category, container.declared_value_nzd, container.customer_tier)
+        if cls["is_ood"] and settings.llm_enabled:
+            diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
             _status, _requires = "escalated", True
         elif risk_level == "low" and cls["classification_decision"] == "automatic":
@@ -616,6 +620,8 @@ class SeaFreightSimulator:
             root_cause_category=root_cause_cat,
             predicted_downstream_impact=impact,
             recovery_cost=cost,
+            recommended_action=best_action,
+            recommendation_reason=action_reason,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1

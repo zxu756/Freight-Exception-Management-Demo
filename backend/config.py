@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     sea_sim_tick_seconds: float = 5.0      # Simulator thread tick interval (real seconds)
     sea_sim_retention_hours: float = 48.0  # Data retention window (sim hours)
 
+    # LLM (DeepSeek) - AI 对话与诊断增强
+    # 配置 DEEPSEEK_API_KEY 环境变量或 .env 后开启
+    llm_enabled: bool = False              # Enable LLM features (needs api key)
+    llm_api_key: str = ""                  # DeepSeek API key (sk-...)
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+
     class Config:
         env_file = ".env"
         case_sensitive = False

@@ -285,6 +285,8 @@ async def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
                 "root_cause_category": x.root_cause_category,
                 "predicted_downstream_impact": x.predicted_downstream_impact,
                 "recovery_cost": x.recovery_cost,
+                "recommended_action": x.recommended_action,
+                "recommendation_reason": x.recommendation_reason,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
@@ -346,6 +348,8 @@ async def get_air_exceptions(
                 "root_cause_category": x.root_cause_category,
                 "predicted_downstream_impact": x.predicted_downstream_impact,
                 "recovery_cost": x.recovery_cost,
+                "recommended_action": x.recommended_action,
+                "recommendation_reason": x.recommendation_reason,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions

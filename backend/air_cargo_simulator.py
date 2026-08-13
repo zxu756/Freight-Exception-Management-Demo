@@ -26,8 +26,9 @@ from air_cargo_models import (
 from air_cargo_seed import generate_airports, flight_duration as _base_flight_duration
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
 from config import settings
-from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost
+from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery
 from notification_models import ExceptionNotification, build_customer_notification
+from llm_client import enhance_diagnosis
 from anomaly_detector import detector
 
 # ============================================================
@@ -951,6 +952,9 @@ class AirCargoSimulator:
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
         cost = estimate_recovery_cost(exc_type, waybill.declared_value_nzd)
+        best_action, action_reason = select_best_recovery(category, waybill.declared_value_nzd, waybill.customer_tier)
+        if cls["is_ood"] and settings.llm_enabled:
+            diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
             _status, _requires = "escalated", True
         elif risk_level == "low" and cls["classification_decision"] == "automatic":
@@ -981,6 +985,8 @@ class AirCargoSimulator:
             root_cause_category=root_cause_cat,
             predicted_downstream_impact=impact,
             recovery_cost=cost,
+            recommended_action=best_action,
+            recommendation_reason=action_reason,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1

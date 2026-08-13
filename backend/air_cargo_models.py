@@ -207,6 +207,8 @@ class AirException(Base):
     root_cause_category = Column(String(50), nullable=True)  # 10 类根因类别
     predicted_downstream_impact = Column(Text, nullable=True)  # 预测下游影响（异常链）
     recovery_cost = Column(Float, nullable=True)  # 恢复成本（NZD）
+    recommended_action = Column(String(50), nullable=True)  # AI 选中的最佳恢复行动
+    recommendation_reason = Column(Text, nullable=True)  # 推荐理由
     resolved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
