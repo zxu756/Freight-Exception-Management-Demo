@@ -138,6 +138,10 @@ export const airAPI = {
     const response = await api.get('/air/dashboard');
     return normalizeDashboard(response.data);
   },
+  getKpi: async () => {
+    const response = await api.get('/air/kpi');
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/air/sim/control', { action, speed });
     return response.data;
@@ -153,6 +157,10 @@ export const roadAPI = {
     const response = await api.get('/road/dashboard');
     return normalizeDashboard(response.data);
   },
+  getKpi: async () => {
+    const response = await api.get('/road/kpi');
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/road/sim/control', { action, speed });
     return response.data;
@@ -167,6 +175,10 @@ export const seaAPI = {
   getDashboard: async (): Promise<TransportDashboardData> => {
     const response = await api.get('/sea/dashboard');
     return normalizeDashboard(response.data);
+  },
+  getKpi: async () => {
+    const response = await api.get('/sea/kpi');
+    return response.data;
   },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/sea/sim/control', { action, speed });

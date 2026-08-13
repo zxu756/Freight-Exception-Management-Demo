@@ -11,6 +11,7 @@ from database import engine, Base
 import air_cargo_models  # noqa: F401  # Register air cargo tables on Base.metadata
 import road_freight_models  # noqa: F401  # Register road freight tables on Base.metadata
 import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.metadata
+import notification_models  # noqa: F401  # Register customer notification table
 
 
 # Create database tables on startup
@@ -37,6 +38,14 @@ def _migrate_ml_fields():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN anomaly_score FLOAT"))
             if "anomaly_reason" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN anomaly_reason VARCHAR(100)"))
+            if "exception_category" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN exception_category VARCHAR(50)"))
+            if "root_cause_category" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN root_cause_category VARCHAR(50)"))
+            if "predicted_downstream_impact" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN predicted_downstream_impact TEXT"))
+            if "recovery_cost" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN recovery_cost FLOAT"))
 
 
 @asynccontextmanager

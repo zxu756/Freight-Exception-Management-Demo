@@ -25,7 +25,7 @@ from air_cargo_models import (
     Airport, AirFlight, AirWaybill, AirTrackingEvent, AirCustomsInspection, AirException
 )
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
-from event_classifier import classifier
+from event_classifier import classifier, map_exception_to_categories
 
 random.seed(42)
 
@@ -598,6 +598,8 @@ def _generate_exceptions(db, waybill, flight, prof, seq):
         business_section=_cls["business_section"],
         classification_confidence=_cls["classification_confidence"],
         classification_decision=_cls["classification_decision"],
+        exception_category=map_exception_to_categories(exc_type)[0],
+        root_cause_category=map_exception_to_categories(exc_type)[1],
     )
     db.add(exc)
 

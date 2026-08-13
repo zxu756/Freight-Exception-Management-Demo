@@ -67,6 +67,14 @@ class DwellTimeAnomalyDetector:
         with self._lock:
             return {f"{m}_{t}": len(h) for (m, t), h in self._history.items()}
 
+    def get_p95(self, mode, transition):
+        """Return the P95 threshold (hours) for a transition, or None if insufficient history."""
+        with self._lock:
+            hist = self._history.get((mode, transition))
+            if hist and len(hist) >= self.min_history:
+                return float(np.percentile(list(hist), self.pct))
+            return None
+
 
 # 全局单例
 detector = DwellTimeAnomalyDetector()

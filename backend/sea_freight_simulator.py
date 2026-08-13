@@ -30,7 +30,8 @@ from sea_freight_seed import (
 )
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
 from config import settings
-from event_classifier import classifier
+from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost
+from notification_models import ExceptionNotification, build_customer_notification
 from anomaly_detector import detector
 
 # 活跃窗口：为 arrival 落在该窗口内的船生成集装箱
@@ -62,6 +63,7 @@ class SeaFreightSimulator:
         self._pending = []
         self._pending_seq = 0
         self._last_cleanup_sim = self.sim_now
+        self._last_missing_check_sim = self.sim_now
         self._generated_vessels = set()
         self._loaded_vessels = False
         self.vessels_loaded = 0
@@ -290,7 +292,18 @@ class SeaFreightSimulator:
                 visit.delay_minutes / 60.0,
                 f"Vessel schedule deviation detected. {visit.delay_reason_code or 'operational'} "
                 f"delay on {visit.vessel_name}. Revised arrival advised to consignee.",
-                ["wait", "expedite_discharge"]
+                ["wait", "expedite_discharge"],
+                reason_code=visit.delay_reason_code
+            )
+
+        # 运力/服务取消 (~0.8%)：计划舱位不可用
+        if random.random() < 0.008:
+            self._create_exception(
+                db, container, "service_cancelled",
+                f"Sailing {visit.vessel_name} {visit.outbound_voyage or ''} omitted, no slot for {container.container_number}",
+                0.0,
+                "Planned vessel sailing was cancelled and the booked container has no available slot.",
+                ["rebook_next_sailing", "alternate_carrier", "split_shipment"]
             )
 
         self._schedule_container_events(container, visit, arrival)
@@ -333,6 +346,18 @@ class SeaFreightSimulator:
         # 货损 (~1%)
         if random.random() < 0.01:
             self._push(dis + timedelta(hours=random.randint(1, 8)), "damage", (cn, port))
+
+        # 货物丢失/失踪 (~0.5%)
+        if random.random() < 0.005:
+            self._push(dis + timedelta(hours=random.randint(6, 24)), "lost", (cn, port))
+
+        # 追踪/数据异常 (~1%)
+        if random.random() < 0.01:
+            self._push(dis + timedelta(hours=random.randint(8, 36)), "tracking_gap", (cn, port))
+
+        # 派送失败 (~1%)
+        if random.random() < 0.01:
+            self._push(delivered + timedelta(hours=1), "failed_delivery", (cn, port))
 
     @staticmethod
     def _is_nz_port_name(name):
@@ -501,7 +526,46 @@ class SeaFreightSimulator:
             ["survey_inspection", "insurance_claim"]
         )
 
-    def _create_exception(self, db, container, exc_type, root_cause, delay_hours, diagnosis, recovery):
+    def _on_lost(self, db, payload):
+        cn, port = payload
+        c = db.query(SeaContainer).filter(SeaContainer.container_number == cn).first()
+        if not c:
+            return
+        self._create_exception(
+            db, c, "lost",
+            "Container cannot be located after discharge",
+            0.0,
+            "Expected arrival scan absent and terminal cannot locate the unit. Network trace initiated.",
+            ["network_trace", "replacement", "insurance_claim"]
+        )
+
+    def _on_tracking_gap(self, db, payload):
+        cn, port = payload
+        c = db.query(SeaContainer).filter(SeaContainer.container_number == cn).first()
+        if not c:
+            return
+        self._create_exception(
+            db, c, "tracking_gap",
+            "No valid tracking event received",
+            0.0,
+            "Tracking feed stale; physical status unconfirmed. Integration ticket raised.",
+            ["resend_event", "integration_ticket", "manual_milestone"]
+        )
+
+    def _on_failed_delivery(self, db, payload):
+        cn, port = payload
+        c = db.query(SeaContainer).filter(SeaContainer.container_number == cn).first()
+        if not c:
+            return
+        self._create_exception(
+            db, c, "failed_delivery",
+            "Delivery attempt failed at receiving site",
+            0.0,
+            "Receiving site issue prevented handover. Redelivery rescheduled.",
+            ["redelivery", "reschedule", "depot_collection"]
+        )
+
+    def _create_exception(self, db, container, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
         eff_delivery = container.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
         sla_breach = (eff_delivery - container.sla_deadline).total_seconds() / 3600 if container.sla_deadline else delay_hours
         mapped = "delay" if exc_type == "vessel_delay" else exc_type
@@ -512,8 +576,22 @@ class SeaFreightSimulator:
             exception_type=mapped
         )
         risk_level = categorize_risk(score)
-        severity = calculate_severity(score, sla_breach, exc_type)
+        severity = calculate_severity(
+            score, sla_breach, exc_type,
+            is_dg=container.is_dg,
+            temp_required=container.temp_min_c is not None,
+            perishable=(container.commodity_code or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
+        )
         cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
+        category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
+        impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
+        cost = estimate_recovery_cost(exc_type, container.declared_value_nzd)
+        if cls["is_ood"]:
+            _status, _requires = "escalated", True
+        elif risk_level == "low" and cls["classification_decision"] == "automatic":
+            _status, _requires = "diagnosed", False
+        else:
+            _status, _requires = "pending_approval", True
         exc = SeaException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             container_number=container.container_number,
@@ -525,20 +603,45 @@ class SeaFreightSimulator:
             root_cause=root_cause,
             ai_diagnosis=diagnosis,
             ai_confidence=round(random.uniform(0.85, 0.98), 2),
-            status="escalated" if cls["is_ood"] else ("diagnosed" if risk_level == "low" else "pending_approval"),
-            requires_human_approval=cls["is_ood"] or risk_level != "low",
-            recovery_options=json.dumps(recovery),
+            status=_status,
+            requires_human_approval=_requires,
+            recovery_options=json.dumps(RECOVERY_PLAYBOOK.get(category, recovery)),
             delay_hours=delay_hours,
             business_section=cls["business_section"],
             classification_confidence=cls["classification_confidence"],
             classification_decision=cls["classification_decision"],
             ood_score=cls["ood_score"],
             is_ood=cls["is_ood"],
+            exception_category=category,
+            root_cause_category=root_cause_cat,
+            predicted_downstream_impact=impact,
+            recovery_cost=cost,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1
         db.add(exc)
         db.flush()
+        self._notify(db, exc, container.customer_name, container.container_number,
+                     category, root_cause, recovery, cls["classification_confidence"],
+                     container.estimated_delivery)
+
+    def _notify(self, db, exc, customer_name, reference, category, root_cause, recovery, confidence, revised_eta):
+        db.add(ExceptionNotification(
+            notification_id=f"NTF-SIM-{self._exc_counter:06d}",
+            mode="sea",
+            exception_id=exc.exception_id,
+            reference=reference,
+            recipient=customer_name,
+            channel="email",
+            message=build_customer_notification(
+                customer_name, reference, category, root_cause, revised_eta,
+                recovery, confidence, self.sim_now + timedelta(hours=2)
+            ),
+            revised_eta=revised_eta,
+            confidence=confidence,
+            next_update_at=self.sim_now + timedelta(hours=2),
+            sent_at=self.sim_now,
+        ))
 
     def _create_predicted_exception(self, db, container, anomaly, transition):
         """Create a predictive anomaly exception from a dwell-time outlier."""
@@ -563,6 +666,8 @@ class SeaFreightSimulator:
             is_ood=False,
             anomaly_score=anomaly["anomaly_score"],
             anomaly_reason=anomaly["anomaly_reason"],
+            exception_category="Delay",
+            root_cause_category="traffic-infrastructure",
         )
         self._exc_counter += 1
         self.exceptions_generated += 1
@@ -592,11 +697,33 @@ class SeaFreightSimulator:
                 self._process_pending(db)
                 self._derive_vessel_statuses(db)
                 db.commit()
+                if (self.sim_now - self._last_missing_check_sim) > timedelta(hours=2):
+                    self._run_missing_event_detection(db)
+                    self._last_missing_check_sim = self.sim_now
                 if (self.sim_now - self._last_cleanup_sim) > timedelta(hours=1):
                     self._cleanup(db)
                     self._last_cleanup_sim = self.sim_now
             finally:
                 db.close()
+
+    def _run_missing_event_detection(self, db):
+        """Flag containers whose next milestone is overdue (missing expected event)."""
+        threshold = detector.get_p95("sea", "DIS_AVC")
+        if not threshold:
+            return
+        stale = db.query(SeaContainer).filter(
+            SeaContainer.discharged_at.isnot(None),
+            SeaContainer.available_at.is_(None),
+            SeaContainer.current_status == "discharged",
+        ).all()
+        for c in stale:
+            elapsed = (self.sim_now - c.discharged_at).total_seconds() / 3600
+            if elapsed > threshold * 1.5:
+                anomaly = {
+                    "anomaly_score": round(elapsed / threshold, 2),
+                    "anomaly_reason": "missing_AVC_after_DIS",
+                }
+                self._create_predicted_exception(db, c, anomaly, "DIS->AVC missing")
 
     def _cleanup(self, db):
         cutoff = self.sim_now - timedelta(hours=settings.sea_sim_retention_hours)

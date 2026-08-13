@@ -35,94 +35,215 @@ OOD_Z_THRESHOLD = 3.0              # learned: distance z-score above this -> out
 # Disable learning in tests to keep them fast and deterministic.
 LEARNING_ENABLED = os.environ.get("EVENT_CLASSIFIER_LEARNING", "true").lower() not in ("0", "false", "no", "off")
 
+# 8 类权威异常分类（Kratos 文档口径）
 SECTIONS = [
-    "Time & Service Disruption",
-    "Route & Location",
-    "Cargo Condition & Security",
-    "Customs & Compliance",
-    "Delivery & Receiving",
-    "Tracking & Data",
+    "Delay",
+    "Damage",
+    "Mis-routing",
+    "Customs Hold",
+    "Lost/Missing",
+    "Failed Delivery",
+    "Tracking/Data",
+    "Capacity/Transport",
 ]
 
-# exception_type -> business section (semi-supervised cluster naming)
+# 10 类根因类别（Kratos 文档口径）
+ROOT_CAUSE_CATEGORIES = [
+    "weather-natural",
+    "traffic-infrastructure",
+    "equipment-failure",
+    "capacity-scheduling",
+    "human-error",
+    "documentation-compliance",
+    "packaging-loading",
+    "receiving-site",
+    "technology-connectivity",
+    "security-theft",
+]
+
+# exception_type -> 8 类异常分类（semi-supervised cluster naming + rule mapping）
 TYPE_TO_SECTION = {
-    "delay": "Time & Service Disruption",
-    "vessel_delay": "Time & Service Disruption",
-    "ferry_delay": "Time & Service Disruption",
-    "breakdown": "Time & Service Disruption",
-    "driver_hours": "Time & Service Disruption",
-    "accident": "Time & Service Disruption",
-    "offload": "Time & Service Disruption",
-    "port_congestion": "Time & Service Disruption",
-    "road_closure": "Route & Location",
-    "misroute": "Route & Location",
-    "diversion": "Route & Location",
-    "temp_excursion": "Cargo Condition & Security",
-    "damage": "Cargo Condition & Security",
-    "customs_hold": "Customs & Compliance",
-    "biosecurity_hold": "Customs & Compliance",
-    "dg_incident": "Customs & Compliance",
-    "overweight": "Customs & Compliance",
+    "delay": "Delay",
+    "vessel_delay": "Delay",
+    "ferry_delay": "Delay",
+    "accident": "Delay",
+    "road_closure": "Delay",
+    "temp_excursion": "Damage",
+    "damage": "Damage",
+    "misroute": "Mis-routing",
+    "diversion": "Mis-routing",
+    "customs_hold": "Customs Hold",
+    "biosecurity_hold": "Customs Hold",
+    "dg_incident": "Customs Hold",
+    "overweight": "Customs Hold",
+    "lost": "Lost/Missing",
+    "failed_delivery": "Failed Delivery",
+    "tracking_gap": "Tracking/Data",
+    "breakdown": "Capacity/Transport",
+    "offload": "Capacity/Transport",
+    "driver_hours": "Capacity/Transport",
+    "service_cancelled": "Capacity/Transport",
+    "port_congestion": "Capacity/Transport",
+    "predicted_anomaly": "Delay",
 }
+
+# exception_type -> 10 类根因（默认值，reason_code 可覆盖）
+TYPE_TO_ROOT_CAUSE = {
+    "delay": "traffic-infrastructure",
+    "vessel_delay": "weather-natural",
+    "ferry_delay": "weather-natural",
+    "accident": "traffic-infrastructure",
+    "road_closure": "traffic-infrastructure",
+    "temp_excursion": "equipment-failure",
+    "damage": "packaging-loading",
+    "misroute": "human-error",
+    "diversion": "human-error",
+    "customs_hold": "documentation-compliance",
+    "biosecurity_hold": "documentation-compliance",
+    "dg_incident": "documentation-compliance",
+    "overweight": "documentation-compliance",
+    "lost": "security-theft",
+    "failed_delivery": "receiving-site",
+    "tracking_gap": "technology-connectivity",
+    "breakdown": "equipment-failure",
+    "offload": "capacity-scheduling",
+    "driver_hours": "capacity-scheduling",
+    "service_cancelled": "capacity-scheduling",
+    "port_congestion": "traffic-infrastructure",
+    "predicted_anomaly": "traffic-infrastructure",
+}
+
+# delay_reason_code -> 10 类根因（细粒度覆盖）
+REASON_TO_ROOT_CAUSE = {
+    "weather": "weather-natural",
+    "congestion": "traffic-infrastructure",
+    "port_congestion": "traffic-infrastructure",
+    "road_closure": "traffic-infrastructure",
+    "accident": "traffic-infrastructure",
+    "mechanical": "equipment-failure",
+    "breakdown": "equipment-failure",
+    "berth_unavailable": "capacity-scheduling",
+    "labour": "capacity-scheduling",
+    "driver_hours": "capacity-scheduling",
+    "ferry": "weather-natural",
+}
+
+
+def map_exception_to_categories(exception_type, reason_code=None):
+    """Map an exception type (+ optional reason) to (category, root_cause)."""
+    category = TYPE_TO_SECTION.get(exception_type, "Delay")
+    root_cause = REASON_TO_ROOT_CAUSE.get(reason_code) or TYPE_TO_ROOT_CAUSE.get(exception_type, "human-error")
+    return category, root_cause
+
+
+# 8 类异常的恢复 playbook（Kratos Task 3 速查表）
+RECOVERY_PLAYBOOK = {
+    "Delay": ["priority_loading", "rebook_next_service", "switch_route_or_mode", "customer_contingency"],
+    "Damage": ["inspection", "repacking", "salvage", "replace_or_reship", "insurance_claim"],
+    "Mis-routing": ["corrected_routing", "intercept", "transfer_correct_lane", "relabel_or_rebook"],
+    "Customs Hold": ["submit_documents", "duty_payment", "coordinate_inspection", "broker_escalation"],
+    "Lost/Missing": ["network_trace", "stop_wrong_delivery", "replacement", "alternate_supply"],
+    "Failed Delivery": ["correct_instructions", "new_appointment", "redelivery", "depot_collection"],
+    "Tracking/Data": ["correct_master_data", "resend_event", "integration_ticket", "manual_milestone"],
+    "Capacity/Transport": ["substitute_equipment", "split_or_prioritise", "rebook_or_reroute", "expedite_critical"],
+}
+
+# exception_type -> 预测下游影响（Kratos Task 6 异常链）
+DOWNSTREAM_IMPACT = {
+    "delay": "missed delivery window -> possible SLA breach",
+    "vessel_delay": "missed sailing connection -> delayed discharge -> SLA risk",
+    "ferry_delay": "missed road connection -> delayed delivery -> SLA risk",
+    "accident": "lane closure -> congestion -> delay -> SLA risk",
+    "road_closure": "detour -> missed connection -> delay -> SLA risk",
+    "temp_excursion": "spoilage risk -> replacement -> customer dissatisfaction",
+    "damage": "inspection/repack -> replacement -> insurance claim",
+    "misroute": "extra handling -> delay -> added cost",
+    "diversion": "off-schedule routing -> delay -> added cost",
+    "customs_hold": "clearance delay -> missed sailing -> SLA breach -> customer escalation",
+    "biosecurity_hold": "inspection delay -> missed delivery -> SLA breach",
+    "dg_incident": "safety exposure -> quarantine -> escalation",
+    "overweight": "rework/reweigh -> delay -> added cost",
+    "lost": "replacement/reship -> customer disruption -> claim",
+    "failed_delivery": "redelivery -> added cost -> customer complaint",
+    "tracking_gap": "uncertain status -> late notification -> avoidable escalation",
+    "breakdown": "substitute vehicle -> delay -> added cost",
+    "offload": "rebook next service -> delay -> SLA risk",
+    "driver_hours": "mandatory rest -> delay -> SLA risk",
+    "service_cancelled": "rebooking -> delay -> SLA risk",
+    "port_congestion": "berth delay -> discharge delay -> SLA risk",
+    "predicted_anomaly": "potential congestion -> delay risk -> proactive monitoring",
+}
+
+# exception_type -> 基础恢复成本（NZD，Task 11 直接成本）
+RECOVERY_BASE_COST = {
+    "delay": 400, "vessel_delay": 700, "ferry_delay": 500, "accident": 700,
+    "road_closure": 500, "temp_excursion": 1200, "damage": 1500,
+    "misroute": 650, "diversion": 800, "customs_hold": 300, "biosecurity_hold": 300,
+    "dg_incident": 500, "overweight": 400, "lost": 2000, "failed_delivery": 150,
+    "tracking_gap": 100, "breakdown": 800, "offload": 900, "driver_hours": 400,
+    "service_cancelled": 900, "port_congestion": 600, "predicted_anomaly": 300,
+}
+
+
+def estimate_recovery_cost(exception_type, cargo_value):
+    """Estimate recovery cost = base cost + small fraction of cargo value."""
+    base = RECOVERY_BASE_COST.get(exception_type, 300)
+    return round(base + (cargo_value or 0) * 0.01, 2)
 
 # Cold-start representative templates (used until the classifier has learned).
 SECTION_TEMPLATES = {
-    "Time & Service Disruption": [
+    "Delay": [
         "service delayed by hours after port congestion near Auckland",
         "scheduled departure missed because of severe weather",
-        "carrier cancelled the booked transport service due to mechanical disruption",
         "shipment has not moved for hours at Tauranga",
-        "connection missed and the next available service departs in hours",
         "Cook Strait ferry sailing was cancelled; delivery ETA shifted by hours",
         "road closure means the linehaul service will arrive hours late",
-        "rail departure was missed and the next transport slot is tomorrow",
         "vessel delayed due to severe weather",
         "vessel delayed due to port congestion",
-        "vessel delayed due to mechanical fault",
         "flight delayed due to weather conditions",
         "road trip delayed due to traffic congestion",
-        "driver exceeded legal work-time limits and must rest",
-        "vehicle broke down en route and recovery was dispatched",
         "ferry sailing cancelled due to strong winds",
         "traffic incident causing lane closure on the corridor",
     ],
-    "Route & Location": [
+    "Damage": [
+        "packaging was crushed and goods were damaged during handling at Auckland",
+        "temperature sensor recorded degrees outside the permitted range",
+        "water entered the container and damaged packaged freight",
+        "reefer probe exceeded the safe temperature range and product condition is at risk",
+        "cartons were crushed during terminal handling and goods may be damaged",
+        "temperature excursion outside the permitted range during transit",
+        "container damage detected during discharge",
+        "refrigeration unit failed and temperature-sensitive goods spoiled",
+    ],
+    "Mis-routing": [
         "shipment scanned at the wrong depot in Hamilton",
         "GPS shows a route deviation toward Christchurch",
         "container was loaded onto a service bound for Wellington instead of Dunedin",
         "planned transfer at Picton was skipped and freight followed the wrong route",
         "consignment is moving away from its planned destination near Napier",
         "pallet intended for Auckland was scanned at the Hamilton depot",
-        "vehicle deviated from the planned route and is heading toward Christchurch",
         "consignment was sorted onto the wrong outbound linehaul instead of Dunedin",
-        "road closed due to a slip and traffic detoured via an inland route",
         "cargo offloaded at the incorrect destination",
     ],
-    "Cargo Condition & Security": [
-        "packaging was crushed and goods were damaged during handling at Auckland",
-        "temperature sensor recorded degrees outside the permitted range",
-        "container seal was broken and requires a security inspection",
-        "water entered the container and damaged packaged freight",
-        "items are missing after suspected unauthorised access",
-        "reefer probe exceeded the safe temperature range and product condition is at risk",
-        "cartons were crushed during terminal handling and goods may be damaged",
-        "security seal appears tampered with and part of the cargo is missing",
-        "temperature excursion outside the permitted range during transit",
-        "container damage detected during discharge",
-    ],
-    "Customs & Compliance": [
+    "Customs Hold": [
         "customs placed the shipment on hold pending document review",
         "commercial invoice is missing and clearance cannot proceed",
         "declared HS code does not match the invoice description",
         "MPI inspection is required before the cargo can be released",
         "dangerous goods declaration is incomplete or inconsistent",
-        "border clearance stopped because the commercial invoice is incomplete",
-        "MPI requested an inspection before releasing the consignment",
         "tariff code conflicts with the goods declaration and customs release is blocked",
         "customs placed the shipment on hold for inspection",
         "MPI biosecurity inspection hold at arrival",
     ],
-    "Delivery & Receiving": [
+    "Lost/Missing": [
+        "a pallet is absent at transfer and cannot be located in the tracking network",
+        "the shipment or a handling unit cannot be located and expected scans are absent",
+        "one pallet has no arrival scan and the terminal cannot locate it",
+        "items are missing after suspected unauthorised access",
+        "the container cannot be found at the destination terminal",
+        "part of the consignment is missing at handover",
+    ],
+    "Failed Delivery": [
         "delivery attempt failed because the receiving site was closed",
         "receiver was unavailable during the booked delivery window",
         "delivery address is incorrect and the driver cannot complete handover",
@@ -132,7 +253,7 @@ SECTION_TEMPLATES = {
         "recipient was not available for the final delivery appointment",
         "street address is invalid and delivery handover cannot be completed",
     ],
-    "Tracking & Data": [
+    "Tracking/Data": [
         "no valid tracking event has been received for hours",
         "carrier API timed out and the latest shipment status is unavailable",
         "duplicate scan events created conflicting shipment statuses",
@@ -141,6 +262,15 @@ SECTION_TEMPLATES = {
         "no carrier scan or tracking event has arrived for hours",
         "integration API endpoint is failing and the shipment status is stale",
         "duplicate proof of delivery records show conflicting tracking states",
+    ],
+    "Capacity/Transport": [
+        "the planned vehicle or equipment became unavailable",
+        "a truck is unavailable and the collection cannot proceed",
+        "a rail service was cancelled and no alternative slot is available",
+        "a vessel sailing was omitted and the booked container has no slot",
+        "vehicle broke down en route and recovery was dispatched",
+        "driver exceeded legal work-time limits and must rest",
+        "planned transport capacity is unavailable due to overbooking",
     ],
 }
 

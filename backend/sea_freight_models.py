@@ -171,6 +171,10 @@ class SeaException(Base):
     is_ood = Column(Boolean, default=False)  # 是否分布外（全新异常模式）
     anomaly_score = Column(Float, nullable=True)  # 预测性异常分数（dwell-time 偏离度）
     anomaly_reason = Column(String(100), nullable=True)  # 如 dwell_DIS_AVC_exceeded_p95
+    exception_category = Column(String(50), nullable=True)  # 8 类权威异常分类
+    root_cause_category = Column(String(50), nullable=True)  # 10 类根因类别
+    predicted_downstream_impact = Column(Text, nullable=True)  # 预测下游影响（异常链）
+    recovery_cost = Column(Float, nullable=True)  # 恢复成本（NZD）
     resolved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -6,6 +6,7 @@ import type { TransportLiveData, TransportDashboardData } from '../types';
 interface ModeData {
   live: TransportLiveData | null;
   dashboard: TransportDashboardData | null;
+  kpi: Record<string, unknown> | null;
 }
 
 type ModeKey = 'air' | 'road' | 'sea';
@@ -88,6 +89,30 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
         </div>
       </div>
 
+      {/* KPI (Kratos Task 12) */}
+      {data.kpi && (data.kpi as Record<string, unknown>).total ? (
+        <div className="grid grid-cols-3 gap-px bg-gray-100 border-t border-gray-100">
+          <div className="bg-white px-4 py-2">
+            <p className="text-[10px] text-gray-500">自动处理率</p>
+            <p className="text-sm font-semibold text-gray-900">
+              {Math.round(((data.kpi as Record<string, unknown>).automation_rate as number) * 100)}%
+            </p>
+          </div>
+          <div className="bg-white px-4 py-2">
+            <p className="text-[10px] text-gray-500">升级率</p>
+            <p className="text-sm font-semibold text-gray-900">
+              {Math.round(((data.kpi as Record<string, unknown>).escalation_rate as number) * 100)}%
+            </p>
+          </div>
+          <div className="bg-white px-4 py-2">
+            <p className="text-[10px] text-gray-500">SLA 违约率</p>
+            <p className="text-sm font-semibold text-gray-900">
+              {Math.round(((data.kpi as Record<string, unknown>).sla_breach_rate as number) * 100)}%
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <div className="px-5 py-4 space-y-4 flex-1">
         {/* Status distribution */}
         {Object.keys(live?.by_status ?? {}).length > 0 && (
@@ -162,7 +187,8 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
           <span className="text-xs font-medium text-gray-500">未关闭异常</span>
           <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto pr-1">
             {openExceptions.slice(0, 8).map((exc) => {
-              const section = (exc.business_section as string) ?? exc.exception_type;
+              const section = (exc.exception_category as string) ?? (exc.business_section as string) ?? exc.exception_type;
+              const aiMismatch = exc.exception_category && exc.business_section && exc.exception_category !== exc.business_section;
               return (
                 <div key={exc.exception_id} className="flex items-start gap-2 text-xs border-b border-gray-50 pb-1.5">
                   <span className={`px-1.5 py-0.5 rounded ${riskColor(exc.risk_level)} shrink-0`}>
@@ -170,6 +196,9 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
                   </span>
                   <div className="min-w-0">
                     <span className="font-medium text-gray-800">{section}</span>
+                    {aiMismatch && (
+                      <span className="ml-1 px-1 py-0.5 bg-amber-100 text-amber-700 rounded text-[10px]">AI≠规则</span>
+                    )}
                     {exc.exception_type === 'predicted_anomaly' && (
                       <span className="ml-1 px-1 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px]">预测</span>
                     )}
@@ -211,24 +240,24 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
 
 const LiveDashboard = () => {
   const [data, setData] = useState<Record<ModeKey, ModeData>>({
-    air: { live: null, dashboard: null },
-    road: { live: null, dashboard: null },
-    sea: { live: null, dashboard: null },
+    air: { live: null, dashboard: null, kpi: null },
+    road: { live: null, dashboard: null, kpi: null },
+    sea: { live: null, dashboard: null, kpi: null },
   });
   const [error, setError] = useState(false);
   const [clock, setClock] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [airLive, airDash, roadLive, roadDash, seaLive, seaDash] = await Promise.all([
-        airAPI.getLive(), airAPI.getDashboard(),
-        roadAPI.getLive(), roadAPI.getDashboard(),
-        seaAPI.getLive(), seaAPI.getDashboard(),
+      const [airLive, airDash, airKpi, roadLive, roadDash, roadKpi, seaLive, seaDash, seaKpi] = await Promise.all([
+        airAPI.getLive(), airAPI.getDashboard(), airAPI.getKpi(),
+        roadAPI.getLive(), roadAPI.getDashboard(), roadAPI.getKpi(),
+        seaAPI.getLive(), seaAPI.getDashboard(), seaAPI.getKpi(),
       ]);
       setData({
-        air: { live: airLive, dashboard: airDash },
-        road: { live: roadLive, dashboard: roadDash },
-        sea: { live: seaLive, dashboard: seaDash },
+        air: { live: airLive, dashboard: airDash, kpi: airKpi },
+        road: { live: roadLive, dashboard: roadDash, kpi: roadKpi },
+        sea: { live: seaLive, dashboard: seaDash, kpi: seaKpi },
       });
       setClock(seaLive.simulator.sim_now);
       setError(false);

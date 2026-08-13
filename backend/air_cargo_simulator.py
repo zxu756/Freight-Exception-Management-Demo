@@ -26,7 +26,8 @@ from air_cargo_models import (
 from air_cargo_seed import generate_airports, flight_duration as _base_flight_duration
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
 from config import settings
-from event_classifier import classifier
+from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost
+from notification_models import ExceptionNotification, build_customer_notification
 from anomaly_detector import detector
 
 # ============================================================
@@ -675,6 +676,18 @@ class AirCargoSimulator:
                 self._push(eff_arr, "temp_alert", awb)
         self._push(eff_arr + timedelta(hours=3 if is_domestic else 6), "dlv", awb)
 
+        # 货物丢失/失踪 (~0.5%)
+        if random.random() < 0.005:
+            self._push(eff_arr + timedelta(hours=random.randint(2, 12)), "lost", awb)
+
+        # 追踪/数据异常 (~1%)
+        if random.random() < 0.01:
+            self._push(eff_arr + timedelta(hours=random.randint(4, 24)), "tracking_gap", awb)
+
+        # 派送失败 (~1%)
+        if random.random() < 0.01:
+            self._push(eff_arr + timedelta(hours=random.randint(4, 10)), "failed_delivery", awb)
+
     def _is_food_cargo(self, waybill):
         hs = waybill.commodity_code or ""
         return hs.startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21"))
@@ -791,7 +804,8 @@ class AirCargoSimulator:
                 diagnosis=(f"{flight.delay_reason_code or 'operational'} delay on {flight.flight_number} "
                            f"{flight.origin_airport}-{flight.destination_airport}. "
                            f"Revised departure {delay_hours:.1f}h later than scheduled."),
-                recovery=["wait", "rebook_next_flight", "upgrade_priority"]
+                recovery=["wait", "rebook_next_flight", "upgrade_priority"],
+                reason_code=flight.delay_reason_code
             )
             self._insert_event(db, w.awb_number, "DLY", "Delay advisory received",
                                flight.origin_airport, reason=flight.delay_reason_code,
@@ -865,6 +879,42 @@ class AirCargoSimulator:
         self._insert_event(db, awb, "DLY", "Temperature excursion alert",
                            w.destination_airport, reason="temp_excursion")
 
+    def _on_lost(self, db, awb):
+        w = db.query(AirWaybill).filter(AirWaybill.awb_number == awb).first()
+        if not w:
+            return
+        self._create_exception(
+            db, w, "lost",
+            "Shipment unit cannot be located after arrival",
+            delay_hours=0.0,
+            diagnosis="Expected arrival scan absent and the handling unit cannot be located. Trace initiated.",
+            recovery=["network_trace", "replacement"]
+        )
+
+    def _on_tracking_gap(self, db, awb):
+        w = db.query(AirWaybill).filter(AirWaybill.awb_number == awb).first()
+        if not w:
+            return
+        self._create_exception(
+            db, w, "tracking_gap",
+            "No valid tracking event received",
+            delay_hours=0.0,
+            diagnosis="Tracking feed stale; physical status unconfirmed.",
+            recovery=["resend_event", "integration_ticket"]
+        )
+
+    def _on_failed_delivery(self, db, awb):
+        w = db.query(AirWaybill).filter(AirWaybill.awb_number == awb).first()
+        if not w:
+            return
+        self._create_exception(
+            db, w, "failed_delivery",
+            "Delivery attempt failed at receiving site",
+            delay_hours=0.0,
+            diagnosis="Receiving site issue prevented handover. Redelivery rescheduled.",
+            recovery=["redelivery", "reschedule"]
+        )
+
     def _on_dlv(self, db, awb):
         w = db.query(AirWaybill).filter(AirWaybill.awb_number == awb).first()
         if not w:
@@ -881,7 +931,7 @@ class AirCargoSimulator:
         w.delivered_at = self.sim_now
         self._insert_event(db, awb, "DLV", "Delivered to consignee", w.destination_airport)
 
-    def _create_exception(self, db, waybill, exc_type, root_cause, delay_hours, diagnosis, recovery):
+    def _create_exception(self, db, waybill, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
         eff_delivery = waybill.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
         sla_breach = (eff_delivery - waybill.sla_deadline).total_seconds() / 3600
         score = calculate_risk_score(
@@ -891,8 +941,22 @@ class AirCargoSimulator:
             exception_type="customs_hold" if exc_type == "customs_hold" else exc_type
         )
         risk_level = categorize_risk(score)
-        severity = calculate_severity(score, sla_breach, exc_type)
+        severity = calculate_severity(
+            score, sla_breach, exc_type,
+            is_dg=waybill.dg_class is not None,
+            temp_required=waybill.temp_min_c is not None,
+            perishable=(waybill.commodity_code or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
+        )
         cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
+        category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
+        impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
+        cost = estimate_recovery_cost(exc_type, waybill.declared_value_nzd)
+        if cls["is_ood"]:
+            _status, _requires = "escalated", True
+        elif risk_level == "low" and cls["classification_decision"] == "automatic":
+            _status, _requires = "diagnosed", False
+        else:
+            _status, _requires = "pending_approval", True
         exc = AirException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             awb_number=waybill.awb_number,
@@ -904,20 +968,45 @@ class AirCargoSimulator:
             root_cause=root_cause,
             ai_diagnosis=diagnosis,
             ai_confidence=round(random.uniform(0.85, 0.98), 2),
-            status="escalated" if cls["is_ood"] else ("diagnosed" if risk_level == "low" else "pending_approval"),
-            requires_human_approval=cls["is_ood"] or risk_level != "low",
-            recovery_options=json.dumps(recovery),
+            status=_status,
+            requires_human_approval=_requires,
+            recovery_options=json.dumps(RECOVERY_PLAYBOOK.get(category, recovery)),
             delay_hours=delay_hours,
             business_section=cls["business_section"],
             classification_confidence=cls["classification_confidence"],
             classification_decision=cls["classification_decision"],
             ood_score=cls["ood_score"],
             is_ood=cls["is_ood"],
+            exception_category=category,
+            root_cause_category=root_cause_cat,
+            predicted_downstream_impact=impact,
+            recovery_cost=cost,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1
         db.add(exc)
         db.flush()
+        self._notify(db, exc, waybill.customer_name, waybill.awb_number,
+                     category, root_cause, recovery, cls["classification_confidence"],
+                     waybill.estimated_delivery)
+
+    def _notify(self, db, exc, customer_name, reference, category, root_cause, recovery, confidence, revised_eta):
+        db.add(ExceptionNotification(
+            notification_id=f"NTF-SIM-{self._exc_counter:06d}",
+            mode="air",
+            exception_id=exc.exception_id,
+            reference=reference,
+            recipient=customer_name,
+            channel="email",
+            message=build_customer_notification(
+                customer_name, reference, category, root_cause, revised_eta,
+                recovery, confidence, self.sim_now + timedelta(hours=2)
+            ),
+            revised_eta=revised_eta,
+            confidence=confidence,
+            next_update_at=self.sim_now + timedelta(hours=2),
+            sent_at=self.sim_now,
+        ))
 
     def _create_predicted_exception(self, db, waybill, anomaly, transition):
         """Create a predictive anomaly exception from a dwell-time outlier."""
@@ -942,6 +1031,8 @@ class AirCargoSimulator:
             is_ood=False,
             anomaly_score=anomaly["anomaly_score"],
             anomaly_reason=anomaly["anomaly_reason"],
+            exception_category="Delay",
+            root_cause_category="traffic-infrastructure",
         )
         self._exc_counter += 1
         self.exceptions_generated += 1

@@ -137,6 +137,8 @@ export interface LiveExceptionItem {
   business_section?: string | null;
   classification_decision?: string | null;
   is_ood?: boolean;
+  exception_category?: string | null;
+  root_cause_category?: string | null;
   [key: string]: unknown;
 }
 

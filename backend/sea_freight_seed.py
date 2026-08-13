@@ -280,6 +280,8 @@ def _generate_container_exceptions(db, container, prof, seq):
         business_section=_cls["business_section"],
         classification_confidence=_cls["classification_confidence"],
         classification_decision=_cls["classification_decision"],
+        exception_category="Customs Hold",
+        root_cause_category="documentation-compliance",
     ))
 
 

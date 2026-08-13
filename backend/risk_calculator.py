@@ -178,7 +178,10 @@ def should_escalate_to_team(
 def calculate_severity(
     risk_score: int,
     sla_breach_hours: float,
-    exception_type: str
+    exception_type: str,
+    is_dg: bool = False,
+    temp_required: bool = False,
+    perishable: bool = False,
 ) -> str:
     """
     Calculate severity level for exception.
@@ -187,10 +190,21 @@ def calculate_severity(
         risk_score: Risk score (0-100)
         sla_breach_hours: Hours of SLA breach
         exception_type: Type of exception
+        is_dg: Dangerous goods cargo (safety exposure)
+        temp_required: Temperature-controlled cargo (cold chain)
+        perishable: Perishable cargo (spoilage risk)
 
     Returns:
         Severity: 'low', 'medium', 'high', or 'critical'
     """
+    # 安全暴露：危险品 + 货损/延误/温度 → Critical
+    if is_dg and exception_type in ("damage", "delay", "temp_excursion", "lost"):
+        return 'critical'
+
+    # 冷链/易腐 + 延误/货损/温度 → Critical（变质风险）
+    if (temp_required or perishable) and exception_type in ("damage", "delay", "temp_excursion") and sla_breach_hours > 0:
+        return 'critical'
+
     if exception_type == 'damage' and risk_score >= 70:
         return 'critical'
 

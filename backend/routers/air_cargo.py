@@ -281,6 +281,10 @@ async def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
                 "is_ood": x.is_ood,
                 "anomaly_score": x.anomaly_score,
                 "anomaly_reason": x.anomaly_reason,
+                "exception_category": x.exception_category,
+                "root_cause_category": x.root_cause_category,
+                "predicted_downstream_impact": x.predicted_downstream_impact,
+                "recovery_cost": x.recovery_cost,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
@@ -338,6 +342,10 @@ async def get_air_exceptions(
                 "is_ood": x.is_ood,
                 "anomaly_score": x.anomaly_score,
                 "anomaly_reason": x.anomaly_reason,
+                "exception_category": x.exception_category,
+                "root_cause_category": x.root_cause_category,
+                "predicted_downstream_impact": x.predicted_downstream_impact,
+                "recovery_cost": x.recovery_cost,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
@@ -402,6 +410,64 @@ async def get_air_dashboard(db: Session = Depends(get_db)):
         "customs": {
             "open_inspections": inspections_open
         }
+    }
+
+
+@router.get("/air/kpi")
+async def get_air_kpi(db: Session = Depends(get_db)):
+    """Get air cargo exception-management KPIs (Kratos Task 12)."""
+    total = db.query(AirException).count()
+    if total == 0:
+        return {"total": 0}
+    diagnosed = db.query(AirException).filter(AirException.status == "diagnosed").count()
+    pending = db.query(AirException).filter(AirException.status == "pending_approval").count()
+    escalated = db.query(AirException).filter(AirException.status == "escalated").count()
+    high_risk = db.query(AirException).filter(AirException.risk_level == "high").count()
+    ood = db.query(AirException).filter(AirException.is_ood == True).count()
+
+    by_category = {}
+    by_root_cause = {}
+    for e in db.query(AirException).all():
+        cat = e.exception_category or "Unknown"
+        rc = e.root_cause_category or "Unknown"
+        by_category[cat] = by_category.get(cat, 0) + 1
+        by_root_cause[rc] = by_root_cause.get(rc, 0) + 1
+
+    return {
+        "total": total,
+        "automation_rate": round(diagnosed / total, 3),
+        "pending_approval_rate": round(pending / total, 3),
+        "escalation_rate": round(escalated / total, 3),
+        "high_risk_rate": round(high_risk / total, 3),
+        "ood_rate": round(ood / total, 3),
+        "sla_breach_rate": round(high_risk / total, 3),
+        "by_category": by_category,
+        "by_root_cause": by_root_cause,
+    }
+
+
+@router.get("/air/notifications")
+async def get_air_notifications(limit: int = 20, db: Session = Depends(get_db)):
+    """Get proactive customer notifications for air cargo exceptions."""
+    from notification_models import ExceptionNotification
+    notifs = db.query(ExceptionNotification).filter(
+        ExceptionNotification.mode == "air"
+    ).order_by(ExceptionNotification.sent_at.desc()).limit(limit).all()
+    return {
+        "count": len(notifs),
+        "notifications": [
+            {
+                "notification_id": n.notification_id,
+                "exception_id": n.exception_id,
+                "reference": n.reference,
+                "recipient": n.recipient,
+                "message": n.message,
+                "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
+                "confidence": n.confidence,
+                "sent_at": n.sent_at.isoformat(),
+            }
+            for n in notifs
+        ]
     }
 
 

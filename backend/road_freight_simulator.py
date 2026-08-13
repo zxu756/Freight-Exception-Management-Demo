@@ -31,7 +31,8 @@ from road_freight_seed import (
 )
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
 from config import settings
-from event_classifier import classifier
+from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost
+from notification_models import ExceptionNotification, build_customer_notification
 from anomaly_detector import detector
 
 # ============================================================
@@ -508,6 +509,18 @@ class RoadFreightSimulator:
         if cons.temp_min_c is not None and random.random() < 0.03:
             self._push(eff_dep + (eff_arr - eff_dep) * random.uniform(0.3, 0.8), "temp_alert", cn)
 
+        # 货物丢失/失踪 (~0.5%)
+        if random.random() < 0.005:
+            self._push(eff_arr + timedelta(hours=1), "lost", cn)
+
+        # 追踪/数据异常 (~1%)
+        if random.random() < 0.01:
+            self._push(eff_dep + (eff_arr - eff_dep) * random.uniform(0.2, 0.7), "tracking_gap", cn)
+
+        # 派送失败 (~1%)
+        if random.random() < 0.01:
+            self._push(eff_arr + timedelta(hours=3), "failed_delivery", cn)
+
     # ----------------------------------------------------------
     # 事件堆
     # ----------------------------------------------------------
@@ -610,7 +623,8 @@ class RoadFreightSimulator:
                 continue
             delay_hours = trip.delay_minutes / 60.0
             root_cause, diagnosis, recovery = self._diagnose(trip, exc_type)
-            self._create_exception(db, c, exc_type, root_cause, delay_hours, diagnosis, recovery)
+            self._create_exception(db, c, exc_type, root_cause, delay_hours, diagnosis, recovery,
+                                   reason_code=trip.delay_reason_code)
             self._insert_event(db, c.consignment_number, "DLY", "Delay advisory received",
                                trip.origin_depot, reason=trip.delay_reason_code,
                                ts=trip.scheduled_departure - timedelta(minutes=30))
@@ -659,6 +673,42 @@ class RoadFreightSimulator:
         self._insert_event(db, cn, "DLY", "Temperature excursion alert",
                            c.destination_depot, reason="temp_excursion")
 
+    def _on_lost(self, db, cn):
+        c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
+        if not c:
+            return
+        self._create_exception(
+            db, c, "lost",
+            "Consignment unit cannot be located",
+            0.0,
+            "Expected scan absent and the handling unit cannot be located. Network trace initiated.",
+            ["network_trace", "replacement"]
+        )
+
+    def _on_tracking_gap(self, db, cn):
+        c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
+        if not c:
+            return
+        self._create_exception(
+            db, c, "tracking_gap",
+            "No valid tracking event received",
+            0.0,
+            "Tracking feed stale; physical status unconfirmed.",
+            ["resend_event", "integration_ticket"]
+        )
+
+    def _on_failed_delivery(self, db, cn):
+        c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
+        if not c:
+            return
+        self._create_exception(
+            db, c, "failed_delivery",
+            "Delivery attempt failed at receiving site",
+            0.0,
+            "Receiving site issue prevented handover. Redelivery rescheduled.",
+            ["redelivery", "reschedule"]
+        )
+
     def _on_pod(self, db, cn):
         c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
         if not c:
@@ -675,7 +725,7 @@ class RoadFreightSimulator:
         c.delivered_at = self.sim_now
         self._insert_event(db, cn, "POD", "Proof of delivery signed", c.destination_depot)
 
-    def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery):
+    def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
         eff_delivery = consignment.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
         sla_breach = (eff_delivery - consignment.sla_deadline).total_seconds() / 3600
         mapped = "delay" if exc_type in ("ferry_delay", "delay", "road_closure", "breakdown",
@@ -687,8 +737,22 @@ class RoadFreightSimulator:
             exception_type=mapped
         )
         risk_level = categorize_risk(score)
-        severity = calculate_severity(score, sla_breach, exc_type)
+        severity = calculate_severity(
+            score, sla_breach, exc_type,
+            is_dg=consignment.dg_class is not None,
+            temp_required=consignment.temp_min_c is not None,
+            perishable=(consignment.commodity_code or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
+        )
         cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
+        category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
+        impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
+        cost = estimate_recovery_cost(exc_type, consignment.declared_value_nzd)
+        if cls["is_ood"]:
+            _status, _requires = "escalated", True
+        elif risk_level == "low" and cls["classification_decision"] == "automatic":
+            _status, _requires = "diagnosed", False
+        else:
+            _status, _requires = "pending_approval", True
         exc = RoadException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             consignment_number=consignment.consignment_number,
@@ -700,20 +764,45 @@ class RoadFreightSimulator:
             root_cause=root_cause,
             ai_diagnosis=diagnosis,
             ai_confidence=round(random.uniform(0.85, 0.98), 2),
-            status="escalated" if cls["is_ood"] else ("diagnosed" if risk_level == "low" else "pending_approval"),
-            requires_human_approval=cls["is_ood"] or risk_level != "low",
-            recovery_options=json.dumps(recovery),
+            status=_status,
+            requires_human_approval=_requires,
+            recovery_options=json.dumps(RECOVERY_PLAYBOOK.get(category, recovery)),
             delay_hours=delay_hours,
             business_section=cls["business_section"],
             classification_confidence=cls["classification_confidence"],
             classification_decision=cls["classification_decision"],
             ood_score=cls["ood_score"],
             is_ood=cls["is_ood"],
+            exception_category=category,
+            root_cause_category=root_cause_cat,
+            predicted_downstream_impact=impact,
+            recovery_cost=cost,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1
         db.add(exc)
         db.flush()
+        self._notify(db, exc, consignment.customer_name, consignment.consignment_number,
+                     category, root_cause, recovery, cls["classification_confidence"],
+                     consignment.estimated_delivery)
+
+    def _notify(self, db, exc, customer_name, reference, category, root_cause, recovery, confidence, revised_eta):
+        db.add(ExceptionNotification(
+            notification_id=f"NTF-SIM-{self._exc_counter:06d}",
+            mode="road",
+            exception_id=exc.exception_id,
+            reference=reference,
+            recipient=customer_name,
+            channel="email",
+            message=build_customer_notification(
+                customer_name, reference, category, root_cause, revised_eta,
+                recovery, confidence, self.sim_now + timedelta(hours=2)
+            ),
+            revised_eta=revised_eta,
+            confidence=confidence,
+            next_update_at=self.sim_now + timedelta(hours=2),
+            sent_at=self.sim_now,
+        ))
 
     def _create_predicted_exception(self, db, consignment, anomaly, transition):
         """Create a predictive anomaly exception from a dwell-time outlier."""
@@ -738,6 +827,8 @@ class RoadFreightSimulator:
             is_ood=False,
             anomaly_score=anomaly["anomaly_score"],
             anomaly_reason=anomaly["anomaly_reason"],
+            exception_category="Delay",
+            root_cause_category="traffic-infrastructure",
         )
         self._exc_counter += 1
         self.exceptions_generated += 1

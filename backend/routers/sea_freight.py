@@ -217,6 +217,10 @@ async def get_container_detail(container_number: str, db: Session = Depends(get_
                 "is_ood": x.is_ood,
                 "anomaly_score": x.anomaly_score,
                 "anomaly_reason": x.anomaly_reason,
+                "exception_category": x.exception_category,
+                "root_cause_category": x.root_cause_category,
+                "predicted_downstream_impact": x.predicted_downstream_impact,
+                "recovery_cost": x.recovery_cost,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
@@ -264,6 +268,10 @@ async def get_sea_exceptions(
                 "is_ood": x.is_ood,
                 "anomaly_score": x.anomaly_score,
                 "anomaly_reason": x.anomaly_reason,
+                "exception_category": x.exception_category,
+                "root_cause_category": x.root_cause_category,
+                "predicted_downstream_impact": x.predicted_downstream_impact,
+                "recovery_cost": x.recovery_cost,
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
@@ -319,6 +327,64 @@ async def get_sea_dashboard(db: Session = Depends(get_db)):
         "cold_chain": {
             "temp_excursion_alerts": temp_alerts
         }
+    }
+
+
+@router.get("/sea/kpi")
+async def get_sea_kpi(db: Session = Depends(get_db)):
+    """Get sea freight exception-management KPIs (Kratos Task 12)."""
+    total = db.query(SeaException).count()
+    if total == 0:
+        return {"total": 0}
+    diagnosed = db.query(SeaException).filter(SeaException.status == "diagnosed").count()
+    pending = db.query(SeaException).filter(SeaException.status == "pending_approval").count()
+    escalated = db.query(SeaException).filter(SeaException.status == "escalated").count()
+    high_risk = db.query(SeaException).filter(SeaException.risk_level == "high").count()
+    ood = db.query(SeaException).filter(SeaException.is_ood == True).count()
+
+    by_category = {}
+    by_root_cause = {}
+    for e in db.query(SeaException).all():
+        cat = e.exception_category or "Unknown"
+        rc = e.root_cause_category or "Unknown"
+        by_category[cat] = by_category.get(cat, 0) + 1
+        by_root_cause[rc] = by_root_cause.get(rc, 0) + 1
+
+    return {
+        "total": total,
+        "automation_rate": round(diagnosed / total, 3),
+        "pending_approval_rate": round(pending / total, 3),
+        "escalation_rate": round(escalated / total, 3),
+        "high_risk_rate": round(high_risk / total, 3),
+        "ood_rate": round(ood / total, 3),
+        "sla_breach_rate": round(high_risk / total, 3),  # high risk ≈ likely SLA breach
+        "by_category": by_category,
+        "by_root_cause": by_root_cause,
+    }
+
+
+@router.get("/sea/notifications")
+async def get_sea_notifications(limit: int = 20, db: Session = Depends(get_db)):
+    """Get proactive customer notifications for sea freight exceptions."""
+    from notification_models import ExceptionNotification
+    notifs = db.query(ExceptionNotification).filter(
+        ExceptionNotification.mode == "sea"
+    ).order_by(ExceptionNotification.sent_at.desc()).limit(limit).all()
+    return {
+        "count": len(notifs),
+        "notifications": [
+            {
+                "notification_id": n.notification_id,
+                "exception_id": n.exception_id,
+                "reference": n.reference,
+                "recipient": n.recipient,
+                "message": n.message,
+                "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
+                "confidence": n.confidence,
+                "sent_at": n.sent_at.isoformat(),
+            }
+            for n in notifs
+        ]
     }
 
 
