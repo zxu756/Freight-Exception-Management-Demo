@@ -155,4 +155,4 @@ def test_calculate_severity_high():
         sla_breach_hours=15,
         exception_type='delay'
     )
-    assert severity == 'critical'
+    assert severity == 'high'

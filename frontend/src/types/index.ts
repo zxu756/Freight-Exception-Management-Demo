@@ -117,3 +117,52 @@ export interface DemoStatus {
   current_step: number;
   timestamp: string;
 }
+
+// ---- Live transport simulator types (air / road / sea) ----
+
+export interface SimulatorState {
+  running: boolean;
+  paused: boolean;
+  speed: number;
+  sim_now: string;
+}
+
+export interface LiveExceptionItem {
+  exception_id: string;
+  exception_type: string;
+  risk_level: string;
+  risk_score: number;
+  status: string;
+  root_cause: string | null;
+  business_section?: string | null;
+  classification_decision?: string | null;
+  is_ood?: boolean;
+  [key: string]: unknown;
+}
+
+export interface LiveEventItem {
+  event_code: string;
+  event_desc: string;
+  timestamp: string;
+  reason_code: string | null;
+  [key: string]: unknown;
+}
+
+export interface TransportLiveData {
+  simulator: SimulatorState;
+  tasks_total: number;
+  by_status: Record<string, number>;
+  open_exceptions: LiveExceptionItem[];
+  recent_events: LiveEventItem[];
+}
+
+export interface TransportDashboardData {
+  exceptions: {
+    open: number;
+    high_risk: number;
+    pending_approval: number;
+    by_type: Record<string, number>;
+    by_risk_level: Record<string, number>;
+  };
+  [key: string]: unknown;
+}

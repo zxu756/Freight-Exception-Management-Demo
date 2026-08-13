@@ -1,0 +1,794 @@
+"""
+Live road freight simulator - continuously generates NZ domestic road freight
+trips, consignments, tracking events and exceptions in real time.
+实时陆运模拟器 - 持续生成新西兰国内公路运输任务、托运单、追踪事件和异常
+
+Design:
+- Simulation clock advances at configurable speed (default 60x: 1 real second = 1 sim minute)
+- ~1000-1500 trips/day across North/South Island line-haul, regional and
+  inter-island (Cook Strait ferry) routes
+- Each trip carries 1-3 consignments with realistic NZ cargo profiles
+- Trip lifecycle: scheduled -> loading -> in_transit -> arrived -> delivered
+- Inter-island trips cross the Cook Strait ferry (Wellington <-> Picton)
+- Exception injection: congestion/weather delays, road closures, breakdowns,
+  driver-hours breaches, ferry cancellations, cold-chain temperature excursions
+- Data retention cleanup to keep the demo database bounded
+"""
+import heapq
+import json
+import random
+import threading
+import time
+from datetime import datetime, timedelta
+
+from database import SessionLocal, WRITE_LOCK
+from road_freight_models import (
+    Depot, RoadTrip, RoadConsignment, RoadTrackingEvent, RoadException
+)
+from road_freight_seed import (
+    generate_depots, road_distance, trip_duration_hours, FERRY_CROSSING_HOURS, NZ_DEPOTS,
+    EXPORT_COMMODITIES, IMPORT_COMMODITIES, DOMESTIC_COMMODITIES, CUSTOMERS
+)
+from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
+from config import settings
+from event_classifier import classifier
+from anomaly_detector import detector
+
+# ============================================================
+# 分拨中心岛别映射
+# ============================================================
+ISLAND_MAP = {c: i for c, _n, _city, _r, i, _h, _c in NZ_DEPOTS}
+NORTH_ISLAND = {c for c, i in ISLAND_MAP.items() if i == "north"}
+SOUTH_ISLAND = {c for c, i in ISLAND_MAP.items() if i == "south"}
+
+# ============================================================
+# 公路线路时刻表 (daily frequency, one-way each direction)
+# ============================================================
+ROUTE_PAIRS = [
+    # 金三角 (Golden Triangle)
+    ("AKL", "HLZ", 45, "Mainfreight", "semi_trailer"),
+    ("AKL", "TRG", 40, "Mainfreight", "semi_trailer"),
+    ("HLZ", "TRG", 20, "Fonterra Transport", "tanker"),
+    ("HLZ", "ROT", 12, "Toll NZ", "semi_trailer"),
+    # 北岛干线
+    ("AKL", "WLG", 40, "Mainfreight", "semi_trailer"),
+    ("AKL", "NPE", 18, "Toll NZ", "semi_trailer"),
+    ("AKL", "NPL", 12, "PBT Transport", "semi_trailer"),
+    ("AKL", "ROT", 15, "Toll NZ", "semi_trailer"),
+    ("AKL", "TAI", 12, "Mainfreight", "box_van"),
+    ("AKL", "WHA", 12, "PBT Transport", "semi_trailer"),
+    ("AKL", "GIS", 10, "Toll NZ", "semi_trailer"),
+    ("WLG", "PMR", 25, "Mainfreight", "semi_trailer"),
+    ("WLG", "NPE", 12, "Hooker Pacific", "semi_trailer"),
+    ("ROT", "TAI", 10, "Toll NZ", "box_van"),
+    ("NPE", "GIS", 8, "Dynes Transport", "box_van"),
+    # 南岛内部
+    ("PIC", "CHC", 30, "Mainfreight", "semi_trailer"),
+    ("PIC", "NSN", 10, "Dynes Transport", "semi_trailer"),
+    ("CHC", "TIM", 18, "Mainfreight", "semi_trailer"),
+    ("TIM", "DUD", 12, "HW Richardson Group", "semi_trailer"),
+    ("DUD", "IVC", 15, "HW Richardson Group", "semi_trailer"),
+    ("CHC", "DUD", 16, "Mainfreight", "semi_trailer"),
+    ("CHC", "GBM", 10, "PBT Transport", "flatbed"),
+    ("CHC", "ZQN", 12, "Mainfreight", "semi_trailer"),
+    ("ZQN", "IVC", 8, "HW Richardson Group", "semi_trailer"),
+    ("DUD", "ZQN", 8, "Toll NZ", "semi_trailer"),
+    ("CHC", "OAM", 12, "Dynes Transport", "semi_trailer"),
+    ("NSN", "BLH", 10, "Dynes Transport", "box_van"),
+    ("TIM", "OAM", 8, "Dynes Transport", "box_van"),
+    ("TIM", "ZQN", 6, "Toll NZ", "box_van"),
+    # 跨库克海峡 (inter-island, via ferry)
+    ("AKL", "CHC", 20, "Mainfreight", "semi_trailer"),
+    ("AKL", "DUD", 12, "Hooker Pacific", "b_double"),
+    ("AKL", "IVC", 6, "HW Richardson Group", "semi_trailer"),
+    ("HLZ", "CHC", 10, "Mainfreight", "semi_trailer"),
+    ("WLG", "CHC", 12, "Mainfreight", "semi_trailer"),
+    ("WLG", "NSN", 8, "Dynes Transport", "semi_trailer"),
+    ("AKL", "ZQN", 6, "Big Chill Distribution", "refrigerated"),
+    # 纯渡轮短驳 (Cook Strait ferry shuttles)
+    ("WLG", "PIC", 40, "Interislander Freight", "semi_trailer"),
+]
+
+# Expand to one-way route list
+ROAD_ROUTES = []
+for org, dst, freq, carrier, vt in ROUTE_PAIRS:
+    ROAD_ROUTES.append((org, dst, freq, carrier, vt))
+    ROAD_ROUTES.append((dst, org, freq, carrier, vt))
+
+CARRIER_PREFIX = {
+    "Mainfreight": "MF", "Toll NZ": "TL", "PBT Transport": "PB", "NZ Post": "NP",
+    "CourierPost": "CP", "Big Chill Distribution": "BD", "Hooker Pacific": "HP",
+    "Dynes Transport": "DY", "HW Richardson Group": "HW", "Fonterra Transport": "FT",
+    "Halls Group": "HG", "Interislander Freight": "IS",
+}
+
+VEHICLE_CAPACITY = {"box_van": 4500, "semi_trailer": 22000, "b_double": 30000,
+                    "refrigerated": 20000, "tanker": 26000, "flatbed": 24000,
+                    "low_loader": 32000}
+
+# 异常原因码 -> 异常类型映射
+REASON_TO_EXCEPTION = {
+    "congestion": "delay",
+    "weather": "delay",
+    "road_closure": "road_closure",
+    "breakdown": "breakdown",
+    "ferry": "ferry_delay",
+    "driver_hours": "driver_hours",
+    "accident": "accident",
+}
+
+# 延误原因权重（非跨岛）
+DELAY_REASONS = [
+    ("congestion", 0.30), ("weather", 0.22), ("road_closure", 0.14),
+    ("breakdown", 0.12), ("driver_hours", 0.10), ("accident", 0.06),
+]
+
+
+class RoadFreightSimulator:
+    """Live road freight operations simulator running as a background thread."""
+
+    def __init__(self, speed=None):
+        self.sim_now = datetime.utcnow().replace(microsecond=0)
+        self.speed = speed if speed is not None else settings.road_sim_speed
+        self.paused = False
+        self.running = False
+        self.started_at = None
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._last_real = time.monotonic()
+        self._route_next_dep = {}
+        self._pending = []
+        self._pending_seq = 0
+        self._last_cleanup_sim = self.sim_now
+        self.trips_generated = 0
+        self.consignments_generated = 0
+        self.exceptions_generated = 0
+        self.events_generated = 0
+
+    # ----------------------------------------------------------
+    # 线程控制
+    # ----------------------------------------------------------
+    def start(self, backfill=True):
+        if self.running:
+            return
+        self.running = True
+        self.started_at = datetime.utcnow()
+        self._init_counters()
+        with WRITE_LOCK:
+            db = SessionLocal()
+            try:
+                generate_depots(db)
+                self._init_route_schedule()
+                self._rebuild_pending_from_db()
+                if backfill:
+                    self._backfill()
+            finally:
+                db.close()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="road-freight-sim")
+        self._thread.start()
+        print(f"[road-sim] started speed={self.speed}x sim_now={self.sim_now.isoformat()}")
+
+    def stop(self):
+        self.running = False
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+        print("[road-sim] stopped")
+
+    def set_speed(self, speed):
+        self.speed = max(0.0, min(float(speed), 3600.0))
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            t0 = time.monotonic()
+            if not self.paused:
+                now_real = time.monotonic()
+                elapsed = now_real - self._last_real
+                self._last_real = now_real
+                self.sim_now += timedelta(seconds=elapsed * self.speed)
+                try:
+                    self.tick()
+                except Exception as e:
+                    print(f"[road-sim] tick error: {e}")
+            time.sleep(max(0.1, settings.road_sim_tick_seconds - (time.monotonic() - t0)))
+
+    # ----------------------------------------------------------
+    # 初始化
+    # ----------------------------------------------------------
+    def _init_counters(self):
+        """Resume ID counters from existing DB data so restarts don't collide."""
+        db = SessionLocal()
+        try:
+            self._used_trip_numbers = {r[0] for r in db.query(RoadTrip.trip_number).all()}
+
+            cn_row = db.query(RoadConsignment.consignment_number).order_by(
+                RoadConsignment.consignment_number.desc()).first()
+            self._cn_counter = (int(cn_row[0].split("-")[1]) + 1) if cn_row else 50000001
+
+            evt_row = db.query(RoadTrackingEvent.event_id).filter(
+                RoadTrackingEvent.event_id.like("EVT-SIM-%")
+            ).order_by(RoadTrackingEvent.event_id.desc()).first()
+            self._event_counter = (int(evt_row[0].split("-")[2]) + 1) if evt_row else 1
+
+            exc_row = db.query(RoadException.exception_id).filter(
+                RoadException.exception_id.like("EXC-SIM-%")
+            ).order_by(RoadException.exception_id.desc()).first()
+            self._exc_counter = (int(exc_row[0].split("-")[2]) + 1) if exc_row else 1
+        finally:
+            db.close()
+
+    def _init_route_schedule(self):
+        for org, dst, freq, carrier, vt in ROAD_ROUTES:
+            key = (org, dst, carrier)
+            interval = 1440.0 / freq
+            first = self.sim_now - timedelta(hours=6)
+            self._route_next_dep[key] = first + timedelta(minutes=random.uniform(0, interval))
+
+    def _backfill(self):
+        """Create trips for [sim_now - 6h, sim_now + 12h) so the dashboard has data immediately."""
+        for key in list(self._route_next_dep.keys()):
+            org, dst, carrier = key
+            freq = next(r[2] for r in ROAD_ROUTES if r[0] == org and r[1] == dst and r[3] == carrier)
+            interval = 1440.0 / freq
+            while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
+                if not self._trip_conflicts(org, dst, carrier, self._route_next_dep[key]):
+                    self._create_trip(org, dst, carrier, dep=self._route_next_dep[key])
+                self._route_next_dep[key] += timedelta(minutes=interval * random.uniform(0.8, 1.2))
+
+    def _rebuild_pending_from_db(self):
+        """Rebuild the in-memory pending event heap after a process restart."""
+        db = SessionLocal()
+        try:
+            trips = db.query(RoadTrip).filter(RoadTrip.status != "cancelled").all()
+            for trip in trips:
+                eff_dep = trip.scheduled_departure + timedelta(minutes=trip.delay_minutes or 0)
+                eff_arr = trip.scheduled_arrival + timedelta(minutes=trip.delay_minutes or 0)
+                consignments = db.query(RoadConsignment).filter(
+                    RoadConsignment.trip_number == trip.trip_number).all()
+                if not consignments:
+                    continue
+                cns = [c.consignment_number for c in consignments]
+                if trip.status != "arrived":
+                    self._push(eff_dep, "trip_dep", trip.trip_number)
+                    self._push(eff_arr, "trip_arr", trip.trip_number)
+                    if trip.delay_minutes and not db.query(RoadException).filter(
+                            RoadException.consignment_number.in_(cns)
+                    ).first():
+                        self._push(trip.scheduled_departure - timedelta(minutes=30),
+                                   "delay_announce", trip.trip_number)
+                for c in consignments:
+                    latest_row = db.query(RoadTrackingEvent.event_code).filter(
+                        RoadTrackingEvent.consignment_number == c.consignment_number
+                    ).order_by(RoadTrackingEvent.timestamp.desc(), RoadTrackingEvent.id.desc()).first()
+                    latest = latest_row[0] if latest_row else None
+                    chain = self._event_chain(trip, c)
+                    codes = [code for _, code, _, _ in chain]
+                    if latest and latest in codes:
+                        start = codes.index(latest) + 1
+                    elif latest == "DLY":
+                        start = codes.index("DEP") if "DEP" in codes else 0
+                    else:
+                        start = 0
+                    for ts, code, desc, loc in chain[start:]:
+                        self._push(ts, "event", (c.consignment_number, code, desc, loc, None, None, ts))
+        finally:
+            db.close()
+
+    def _event_chain(self, trip, consignment):
+        """Ordered POD milestone chain for a consignment."""
+        dep = trip.scheduled_departure
+        eff_dep = dep + timedelta(minutes=trip.delay_minutes or 0)
+        eff_arr = trip.scheduled_arrival + timedelta(minutes=trip.delay_minutes or 0)
+        chain = [
+            (dep - timedelta(hours=4), "PUP", "Consignment picked up", consignment.origin_depot),
+            (dep - timedelta(hours=2), "LOAD", "Loaded onto vehicle", consignment.origin_depot),
+            (eff_dep, "DEP", "Vehicle departed", consignment.origin_depot),
+        ]
+        if trip.is_inter_island:
+            ferry_ts = eff_dep + (eff_arr - eff_dep) * 0.5
+            chain.append((ferry_ts, "FERRY", "Cook Strait ferry crossing",
+                          "WLG" if consignment.origin_depot in NORTH_ISLAND else "PIC"))
+        chain.append((eff_arr, "ARR", "Vehicle arrived", consignment.destination_depot))
+        chain.append((eff_arr + timedelta(hours=1), "UNLD", "Cargo unloaded", consignment.destination_depot))
+        chain.append((eff_arr + timedelta(hours=2), "POD", "Proof of delivery signed", consignment.destination_depot))
+        return chain
+
+    # ----------------------------------------------------------
+    # 主 tick
+    # ----------------------------------------------------------
+    def tick(self):
+        with WRITE_LOCK:
+            db = SessionLocal()
+            try:
+                self._spawn_due_trips()
+                self._process_pending(db)
+                self._derive_trip_statuses(db)
+                if (self.sim_now - self._last_cleanup_sim) > timedelta(hours=1):
+                    self._cleanup(db)
+                    self._last_cleanup_sim = self.sim_now
+            finally:
+                db.close()
+
+    def _spawn_due_trips(self):
+        for org, dst, freq, carrier, vt in ROAD_ROUTES:
+            key = (org, dst, carrier)
+            interval = 1440.0 / freq
+            while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
+                if not self._trip_conflicts(org, dst, carrier, self._route_next_dep[key]):
+                    self._create_trip(org, dst, carrier, dep=self._route_next_dep[key])
+                self._route_next_dep[key] += timedelta(minutes=interval * random.uniform(0.8, 1.2))
+
+    def _trip_conflicts(self, org, dst, carrier, dep):
+        """Skip spawning if a trip on the same route already exists within 20 minutes."""
+        db = SessionLocal()
+        try:
+            conflict = db.query(RoadTrip).filter(
+                RoadTrip.origin_depot == org,
+                RoadTrip.destination_depot == dst,
+                RoadTrip.carrier == carrier,
+                RoadTrip.scheduled_departure >= dep - timedelta(minutes=20),
+                RoadTrip.scheduled_departure <= dep + timedelta(minutes=20),
+            ).first()
+            return conflict is not None
+        finally:
+            db.close()
+
+    # ----------------------------------------------------------
+    # 运输任务与托运单生成
+    # ----------------------------------------------------------
+    def _create_trip(self, org, dst, carrier, dep=None):
+        route = next((r for r in ROAD_ROUTES if r[0] == org and r[1] == dst and r[3] == carrier), None)
+        if route is None:
+            return None
+        vehicle_type = route[4]
+        dep = dep or self._route_next_dep.get((org, dst, carrier), self.sim_now)
+        is_inter_island = ISLAND_MAP[org] != ISLAND_MAP[dst]
+        dur = trip_duration_hours(org, dst, is_inter_island)
+        arr = dep + timedelta(hours=dur)
+
+        delay_minutes = 0
+        delay_reason = None
+        cancelled = not is_inter_island and random.random() < 0.008
+
+        if not cancelled:
+            if is_inter_island and random.random() < 0.08:
+                delay_minutes = int(random.choice([180, 240, 300, 360, 420, 540, 720]))
+                delay_reason = "ferry"
+            elif random.random() < 0.14:
+                delay_minutes = int(random.choice([15, 20, 30, 40, 45, 60, 90, 120, 150, 180, 240, 300]))
+                delay_reason = random.choices([r[0] for r in DELAY_REASONS],
+                                              weights=[r[1] for r in DELAY_REASONS])[0]
+
+        distance = road_distance(org, dst)
+        capacity = VEHICLE_CAPACITY.get(vehicle_type, 15000)
+        trip_number = self._unique_trip_number(carrier)
+
+        db = SessionLocal()
+        try:
+            trip = RoadTrip(
+                trip_number=trip_number, carrier=carrier, vehicle_type=vehicle_type,
+                origin_depot=org, destination_depot=dst,
+                is_inter_island=is_inter_island,
+                scheduled_departure=dep, scheduled_arrival=arr,
+                delay_minutes=delay_minutes, delay_reason_code=delay_reason,
+                status="cancelled" if cancelled else "scheduled",
+                distance_km=distance, capacity_kg=capacity,
+                loaded_kg=int(capacity * random.uniform(0.5, 0.95)),
+                driver_name=f"Driver {random.randint(100, 999)}",
+                driver_hours_remaining=round(random.uniform(4, 13), 1),
+                trip_date=dep,
+            )
+            trip.loaded_pct = round(trip.loaded_kg / capacity * 100, 1)
+            db.add(trip)
+            db.flush()
+            self.trips_generated += 1
+
+            if not cancelled:
+                n_cons = random.choices([1, 2, 3], weights=[0.6, 0.3, 0.1])[0]
+                for _ in range(n_cons):
+                    self._create_consignment(db, trip, dep, arr, delay_minutes)
+                eff_dep = dep + timedelta(minutes=delay_minutes)
+                eff_arr = arr + timedelta(minutes=delay_minutes)
+                if delay_minutes > 0:
+                    self._push(dep - timedelta(minutes=30), "delay_announce", trip_number)
+                self._push(eff_dep, "trip_dep", trip_number)
+                self._push(eff_arr, "trip_arr", trip_number)
+            db.commit()
+            db.refresh(trip)
+            db.expunge(trip)
+            return trip
+        finally:
+            db.close()
+
+    def _unique_trip_number(self, carrier):
+        prefix = CARRIER_PREFIX.get(carrier, "XX")
+        for _ in range(100):
+            num = random.randint(10000, 99999)
+            candidate = f"{prefix}{num}"
+            if candidate not in self._used_trip_numbers:
+                self._used_trip_numbers.add(candidate)
+                return candidate
+        return f"{prefix}{random.randint(100000, 999999)}"
+
+    def _create_consignment(self, db, trip, dep, arr, delay_minutes):
+        org = trip.origin_depot
+        dst = trip.destination_depot
+        is_inter_island = trip.is_inter_island
+
+        if org in {"TRG", "NPE", "NPL", "GIS"} or dst in {"TRG", "NPE", "NPL", "GIS"}:
+            pool = EXPORT_COMMODITIES
+            route_type = "regional"
+        elif org in {"AKL", "CHC"} and dst in {"AKL", "CHC"}:
+            pool = IMPORT_COMMODITIES if random.random() < 0.3 else DOMESTIC_COMMODITIES
+            route_type = "line_haul"
+        elif is_inter_island:
+            pool = DOMESTIC_COMMODITIES
+            route_type = "inter_island"
+        else:
+            pool = DOMESTIC_COMMODITIES if random.random() < 0.7 else EXPORT_COMMODITIES
+            route_type = "line_haul" if road_distance(org, dst) > 250 else "regional"
+
+        desc, hs, value_range, tiers, vt, temp = random.choice(pool)
+        value = random.randint(*value_range)
+        pieces = random.randint(2, 40)
+        weight = round(pieces * random.uniform(50, 400), 1)
+        volume = round(weight / 160.0, 2)
+
+        customer, tier = random.choice(CUSTOMERS)
+        if random.random() < 0.08:
+            tier = "VIP"
+        elif tier == "VIP" and random.random() < 0.7:
+            tier = "high"
+
+        service = "express" if (random.random() < 0.18) else "standard"
+        priority = "normal"
+        if "urgent" in desc or random.random() < 0.06:
+            priority = "critical"
+        elif tier in ("VIP", "high") and random.random() < 0.3:
+            priority = "high"
+        if priority == "critical":
+            service = "express"
+
+        dur_hours = trip_duration_hours(org, dst, is_inter_island)
+        sla_h = max(6.0, round(dur_hours * random.choice([0.9, 1.1, 1.3, 1.5]), 1))
+        if service == "express":
+            sla_h = max(4.0, sla_h * 0.6)
+
+        temp_min, temp_max = None, None
+        if temp:
+            temp_min, temp_max = temp
+
+        cn = f"RD-{self._cn_counter:08d}"
+        self._cn_counter += 1
+
+        delivery_buffer = 2.0
+        eff_arr = arr + timedelta(minutes=delay_minutes)
+        cons = RoadConsignment(
+            consignment_number=cn, trip_number=trip.trip_number,
+            route_type=route_type, origin_depot=org, destination_depot=dst,
+            pieces=pieces, gross_weight_kg=weight, volume_cbm=volume,
+            commodity_code=hs, commodity_desc=desc,
+            shipper_name=customer, consignee_name=f"{customer} DC",
+            customer_name=customer, customer_tier=tier,
+            declared_value_nzd=float(value), service_level=service,
+            priority=priority,
+            sla_tier={"VIP": "gold", "high": "gold", "medium": "silver", "low": "bronze"}[tier],
+            temp_required_c=temp_min if (vt == "refrigerated" and temp_min is not None) else None,
+            temp_min_c=temp_min, temp_max_c=temp_max,
+            dg_class="3" if "DGR3" in desc else None,
+            un_number="UN1133" if "DGR3" in desc else None,
+            current_status="booked", current_location=org,
+            scheduled_delivery=eff_arr + timedelta(hours=delivery_buffer),
+            estimated_delivery=eff_arr + timedelta(hours=delivery_buffer),
+            sla_deadline=dep + timedelta(hours=sla_h),
+        )
+        db.add(cons)
+        db.flush()
+        self.consignments_generated += 1
+
+        self._schedule_consignment_events(cons, trip, dep, arr, delay_minutes)
+
+    def _schedule_consignment_events(self, cons, trip, dep, arr, delay_minutes):
+        eff_dep = dep + timedelta(minutes=delay_minutes)
+        eff_arr = arr + timedelta(minutes=delay_minutes)
+        cn = cons.consignment_number
+        org, dst = trip.origin_depot, trip.destination_depot
+
+        self._push(dep - timedelta(hours=4), "event", (cn, "PUP", "Consignment picked up", org, None, None, dep - timedelta(hours=4)))
+        self._push(dep - timedelta(hours=2), "event", (cn, "LOAD", "Loaded onto vehicle", org, None, None, dep - timedelta(hours=2)))
+
+        if trip.is_inter_island:
+            ferry_ts = eff_dep + (eff_arr - eff_dep) * 0.5
+            self._push(ferry_ts, "event", (cn, "FERRY", "Cook Strait ferry crossing",
+                                           "WLG" if org in NORTH_ISLAND else "PIC", None, None, ferry_ts))
+
+        self._push(eff_arr + timedelta(hours=2), "pod", cn)
+
+        if cons.temp_min_c is not None and random.random() < 0.03:
+            self._push(eff_dep + (eff_arr - eff_dep) * random.uniform(0.3, 0.8), "temp_alert", cn)
+
+    # ----------------------------------------------------------
+    # 事件堆
+    # ----------------------------------------------------------
+    def _push(self, sim_time, kind, payload):
+        self._pending_seq += 1
+        heapq.heappush(self._pending, (sim_time, self._pending_seq, kind, payload))
+
+    def _process_pending(self, db):
+        while self._pending and self._pending[0][0] <= self.sim_now:
+            _, _, kind, payload = heapq.heappop(self._pending)
+            try:
+                handler = getattr(self, f"_on_{kind}")
+                handler(db, payload)
+            except AttributeError:
+                print(f"[road-sim] unknown pending kind: {kind}")
+            except Exception as e:
+                print(f"[road-sim] pending handler error ({kind}): {e}")
+
+    # ----------------------------------------------------------
+    # 事件处理器
+    # ----------------------------------------------------------
+    def _on_event(self, db, payload):
+        cn, code, desc, loc, reason, message, ts = payload
+        self._insert_event(db, cn, code, desc, loc, reason, message, ts=ts)
+
+    def _insert_event(self, db, cn, code, desc, loc, reason=None, message=None, ts=None):
+        event = RoadTrackingEvent(
+            event_id=f"EVT-SIM-{self._event_counter:09d}",
+            consignment_number=cn, event_code=code, event_desc=desc,
+            location=loc, timestamp=ts or self.sim_now, source="tms",
+            reason_code=reason, message=message or f"TMS status update: {code} {loc}"
+        )
+        self._event_counter += 1
+        self.events_generated += 1
+        db.add(event)
+
+    def _on_trip_dep(self, db, trip_number):
+        trip = db.query(RoadTrip).filter(RoadTrip.trip_number == trip_number).first()
+        if not trip or trip.status == "cancelled":
+            return
+        trip.status = "in_transit"
+        eff_dep = trip.scheduled_departure + timedelta(minutes=trip.delay_minutes or 0)
+        trip.actual_departure = eff_dep
+        db.flush()
+        for c in db.query(RoadConsignment).filter(RoadConsignment.trip_number == trip_number).all():
+            dup = db.query(RoadTrackingEvent).filter(
+                RoadTrackingEvent.consignment_number == c.consignment_number,
+                RoadTrackingEvent.event_code == "DEP"
+            ).first()
+            if dup:
+                continue
+            if c.current_status in ("booked", "PUP", "LOAD"):
+                c.current_status = "DEP"
+                c.current_location = trip.destination_depot
+            self._insert_event(db, c.consignment_number, "DEP", "Vehicle departed",
+                               trip.origin_depot, ts=eff_dep)
+
+    def _on_trip_arr(self, db, trip_number):
+        trip = db.query(RoadTrip).filter(RoadTrip.trip_number == trip_number).first()
+        if not trip or trip.status == "cancelled":
+            return
+        trip.status = "arrived"
+        eff_arr = trip.scheduled_arrival + timedelta(minutes=trip.delay_minutes or 0)
+        trip.actual_arrival = eff_arr
+        db.flush()
+        if trip.actual_departure:
+            dwell = (trip.actual_arrival - trip.actual_departure).total_seconds() / 3600
+            anomaly = detector.observe("road", "DEP_ARR", dwell)
+            if anomaly:
+                for c in db.query(RoadConsignment).filter(RoadConsignment.trip_number == trip_number).all():
+                    self._create_predicted_exception(db, c, anomaly, "DEP->ARR")
+                    break
+        for c in db.query(RoadConsignment).filter(RoadConsignment.trip_number == trip_number).all():
+            dup = db.query(RoadTrackingEvent).filter(
+                RoadTrackingEvent.consignment_number == c.consignment_number,
+                RoadTrackingEvent.event_code == "ARR"
+            ).first()
+            if dup:
+                continue
+            c.current_status = "ARR"
+            c.current_location = trip.destination_depot
+            self._insert_event(db, c.consignment_number, "ARR", "Vehicle arrived",
+                               trip.destination_depot, ts=eff_arr)
+            self._push(eff_arr + timedelta(hours=1), "event",
+                       (c.consignment_number, "UNLD", "Cargo unloaded", trip.destination_depot,
+                        None, None, eff_arr + timedelta(hours=1)))
+
+    def _on_delay_announce(self, db, trip_number):
+        trip = db.query(RoadTrip).filter(RoadTrip.trip_number == trip_number).first()
+        if not trip or trip.status == "cancelled" or not trip.delay_minutes:
+            return
+        exc_type = REASON_TO_EXCEPTION.get(trip.delay_reason_code, "delay")
+        for c in db.query(RoadConsignment).filter(RoadConsignment.trip_number == trip_number).all():
+            dup = db.query(RoadException).filter(
+                RoadException.consignment_number == c.consignment_number,
+                RoadException.exception_type == exc_type,
+                RoadException.status != "resolved"
+            ).count()
+            if dup:
+                continue
+            delay_hours = trip.delay_minutes / 60.0
+            root_cause, diagnosis, recovery = self._diagnose(trip, exc_type)
+            self._create_exception(db, c, exc_type, root_cause, delay_hours, diagnosis, recovery)
+            self._insert_event(db, c.consignment_number, "DLY", "Delay advisory received",
+                               trip.origin_depot, reason=trip.delay_reason_code,
+                               ts=trip.scheduled_departure - timedelta(minutes=30))
+
+    def _diagnose(self, trip, exc_type):
+        reason = trip.delay_reason_code
+        if exc_type == "road_closure":
+            return ("SH1 closed due to slip near Oamaru",
+                    "NZTA reports SH1 closed after heavy rain caused a slip. Detour via inland route adds delay.",
+                    ["reroute", "wait"])
+        if exc_type == "ferry_delay":
+            return ("Cook Strait ferry sailing cancelled due to strong winds",
+                    "MetService issued gale warning for Cook Strait. Interislander cancelled sailings. "
+                    "Consignment re-booked on next sailing.",
+                    ["wait", "reroute"])
+        if exc_type == "breakdown":
+            return ("Vehicle breakdown en route",
+                    "Vehicle mechanical fault detected. Recovery vehicle dispatched, load transferred to substitute unit.",
+                    ["substitute_vehicle", "wait"])
+        if exc_type == "driver_hours":
+            return ("Driver exceeded legal work-time limits",
+                    "Logbook audit shows driver approaching 13h work limit. Mandatory rest required. "
+                    "Second driver dispatched.",
+                    ["dispatch_second_driver", "wait"])
+        if exc_type == "accident":
+            return ("Traffic incident on route",
+                    "Minor traffic incident causing lane closure and congestion on the corridor.",
+                    ["reroute", "wait"])
+        return (f"Trip delayed: {reason}",
+                f"Operational delay ({reason}) on {trip.trip_number}. Revised ETA updated.",
+                ["wait"])
+
+    def _on_temp_alert(self, db, cn):
+        c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
+        if not c:
+            return
+        c.temp_excursion_alert = True
+        self._create_exception(
+            db, c, "temp_excursion",
+            f"Temperature excursion outside {c.temp_min_c}-{c.temp_max_c}C range during transit",
+            0.0,
+            "Reefer temperature logger deviation detected. Shipper stability data supports short excursion. "
+            "Recommend expedited delivery and customer notification.",
+            ["wait", "substitute_vehicle", "express_courier"]
+        )
+        self._insert_event(db, cn, "DLY", "Temperature excursion alert",
+                           c.destination_depot, reason="temp_excursion")
+
+    def _on_pod(self, db, cn):
+        c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
+        if not c:
+            return
+        db.flush()
+        dup = db.query(RoadTrackingEvent).filter(
+            RoadTrackingEvent.consignment_number == cn,
+            RoadTrackingEvent.event_code == "POD"
+        ).first()
+        if dup:
+            return
+        c.current_status = "POD"
+        c.current_location = c.destination_depot
+        c.delivered_at = self.sim_now
+        self._insert_event(db, cn, "POD", "Proof of delivery signed", c.destination_depot)
+
+    def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery):
+        eff_delivery = consignment.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
+        sla_breach = (eff_delivery - consignment.sla_deadline).total_seconds() / 3600
+        mapped = "delay" if exc_type in ("ferry_delay", "delay", "road_closure", "breakdown",
+                                         "driver_hours", "accident") else exc_type
+        score = calculate_risk_score(
+            cargo_value=consignment.declared_value_nzd,
+            customer_tier=consignment.customer_tier,
+            sla_breach_hours=sla_breach,
+            exception_type=mapped
+        )
+        risk_level = categorize_risk(score)
+        severity = calculate_severity(score, sla_breach, exc_type)
+        cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
+        exc = RoadException(
+            exception_id=f"EXC-SIM-{self._exc_counter:06d}",
+            consignment_number=consignment.consignment_number,
+            exception_type=exc_type,
+            severity=severity,
+            risk_level=risk_level,
+            risk_score=score,
+            detected_at=self.sim_now,
+            root_cause=root_cause,
+            ai_diagnosis=diagnosis,
+            ai_confidence=round(random.uniform(0.85, 0.98), 2),
+            status="escalated" if cls["is_ood"] else ("diagnosed" if risk_level == "low" else "pending_approval"),
+            requires_human_approval=cls["is_ood"] or risk_level != "low",
+            recovery_options=json.dumps(recovery),
+            delay_hours=delay_hours,
+            business_section=cls["business_section"],
+            classification_confidence=cls["classification_confidence"],
+            classification_decision=cls["classification_decision"],
+            ood_score=cls["ood_score"],
+            is_ood=cls["is_ood"],
+        )
+        self._exc_counter += 1
+        self.exceptions_generated += 1
+        db.add(exc)
+        db.flush()
+
+    def _create_predicted_exception(self, db, consignment, anomaly, transition):
+        """Create a predictive anomaly exception from a dwell-time outlier."""
+        exc = RoadException(
+            exception_id=f"EXC-SIM-{self._exc_counter:06d}",
+            consignment_number=consignment.consignment_number,
+            exception_type="predicted_anomaly",
+            severity="medium",
+            risk_level="medium",
+            risk_score=50,
+            detected_at=self.sim_now,
+            root_cause=f"{transition} dwell time abnormal for {consignment.consignment_number}",
+            ai_diagnosis=f"Dwell time {transition} exceeds recent P95 by {anomaly['anomaly_score']}x. Potential route delay or congestion.",
+            ai_confidence=round(random.uniform(0.7, 0.85), 2),
+            status="detected",
+            requires_human_approval=True,
+            recovery_options=json.dumps(["monitor", "reroute"]),
+            delay_hours=0.0,
+            business_section="Time & Service Disruption",
+            classification_decision="human_review",
+            ood_score=0.0,
+            is_ood=False,
+            anomaly_score=anomaly["anomaly_score"],
+            anomaly_reason=anomaly["anomaly_reason"],
+        )
+        self._exc_counter += 1
+        self.exceptions_generated += 1
+        db.add(exc)
+        db.flush()
+
+    # ----------------------------------------------------------
+    # 状态推导
+    # ----------------------------------------------------------
+    def _derive_trip_statuses(self, db):
+        active = db.query(RoadTrip).filter(
+            RoadTrip.status.in_(["scheduled", "loading", "in_transit", "delayed"])
+        ).all()
+        for trip in active:
+            eff_dep = trip.scheduled_departure + timedelta(minutes=trip.delay_minutes or 0)
+            eff_arr = trip.scheduled_arrival + timedelta(minutes=trip.delay_minutes or 0)
+            if self.sim_now < trip.scheduled_departure - timedelta(minutes=40):
+                new_status = "scheduled"
+            elif self.sim_now < eff_dep:
+                new_status = "loading" if not trip.delay_minutes else "delayed"
+            elif self.sim_now < eff_arr:
+                new_status = "in_transit"
+            else:
+                new_status = "arrived"
+                trip.actual_arrival = eff_arr
+            if new_status != trip.status:
+                trip.status = new_status
+
+    # ----------------------------------------------------------
+    # 数据保留清理
+    # ----------------------------------------------------------
+    def _cleanup(self, db):
+        cutoff = self.sim_now - timedelta(hours=settings.road_sim_retention_hours)
+        old_cons = db.query(RoadConsignment).filter(
+            RoadConsignment.delivered_at.isnot(None),
+            RoadConsignment.delivered_at < cutoff
+        ).all()
+        if old_cons:
+            cns = [c.consignment_number for c in old_cons]
+            db.query(RoadException).filter(RoadException.consignment_number.in_(cns)).delete(synchronize_session=False)
+            db.query(RoadTrackingEvent).filter(RoadTrackingEvent.consignment_number.in_(cns)).delete(synchronize_session=False)
+            for c in old_cons:
+                db.delete(c)
+        old_trips = db.query(RoadTrip).filter(
+            RoadTrip.status.in_(["arrived", "cancelled"]),
+            RoadTrip.scheduled_arrival < cutoff - timedelta(hours=24)
+        ).all()
+        for t in old_trips:
+            db.delete(t)
+        db.commit()
+
+
+# 全局单例
+simulator = RoadFreightSimulator()
