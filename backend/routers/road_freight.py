@@ -289,6 +289,68 @@ async def get_road_exceptions(
     }
 
 
+@router.get("/road/exceptions/{exception_id}")
+async def get_road_exception_detail(exception_id: str, db: Session = Depends(get_db)):
+    """Get a single exception with full detail for the four-step AI pipeline view."""
+    exc = db.query(RoadException).filter(RoadException.exception_id == exception_id).first()
+    if not exc:
+        raise HTTPException(status_code=404, detail="Exception not found")
+
+    cons = db.query(RoadConsignment).filter(
+        RoadConsignment.consignment_number == exc.consignment_number).first()
+
+    from notification_models import ExceptionNotification
+    notifications = db.query(ExceptionNotification).filter(
+        ExceptionNotification.exception_id == exception_id).all()
+
+    return {
+        "exception_id": exc.exception_id,
+        "exception_type": exc.exception_type,
+        "exception_category": exc.exception_category,
+        "root_cause_category": exc.root_cause_category,
+        "severity": exc.severity,
+        "risk_level": exc.risk_level,
+        "risk_score": exc.risk_score,
+        "status": exc.status,
+        "requires_human_approval": exc.requires_human_approval,
+        "root_cause": exc.root_cause,
+        "ai_diagnosis": exc.ai_diagnosis,
+        "ai_confidence": exc.ai_confidence,
+        "business_section": exc.business_section,
+        "classification_confidence": exc.classification_confidence,
+        "classification_decision": exc.classification_decision,
+        "ood_score": exc.ood_score,
+        "is_ood": exc.is_ood,
+        "anomaly_score": exc.anomaly_score,
+        "anomaly_reason": exc.anomaly_reason,
+        "recovery_options": exc.recovery_options,
+        "recommended_action": exc.recommended_action,
+        "recommendation_reason": exc.recommendation_reason,
+        "recovery_cost": exc.recovery_cost,
+        "predicted_downstream_impact": exc.predicted_downstream_impact,
+        "delay_hours": exc.delay_hours,
+        "detected_at": exc.detected_at.isoformat(),
+        "cargo": {
+            "consignment_number": cons.consignment_number if cons else exc.consignment_number,
+            "commodity_desc": cons.commodity_desc if cons else None,
+            "declared_value_nzd": cons.declared_value_nzd if cons else None,
+            "customer_name": cons.customer_name if cons else None,
+            "customer_tier": cons.customer_tier if cons else None,
+            "route_type": cons.route_type if cons else None,
+        },
+        "notifications": [
+            {
+                "notification_id": n.notification_id,
+                "message": n.message,
+                "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
+                "confidence": n.confidence,
+                "sent_at": n.sent_at.isoformat(),
+            }
+            for n in notifications
+        ],
+    }
+
+
 @router.get("/road/dashboard")
 async def get_road_dashboard(db: Session = Depends(get_db)):
     """Get road freight operations dashboard summary."""

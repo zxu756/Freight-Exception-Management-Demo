@@ -9,6 +9,7 @@ os.environ["ROAD_SIM_ENABLED"] = "false"
 os.environ["SEA_SIM_ENABLED"] = "false"
 os.environ["PORTCONNECT_API_ENABLED"] = "false"
 os.environ["EVENT_CLASSIFIER_LEARNING"] = "false"
+os.environ["LLM_ENABLED"] = "false"
 
 
 import pytest

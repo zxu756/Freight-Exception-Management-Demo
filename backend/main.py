@@ -132,12 +132,8 @@ async def health_check():
 
 
 # Import and include routers
-from routers import exceptions, shipments, decisions, demo, air_cargo, road_freight, sea_freight, ask
+from routers import air_cargo, road_freight, sea_freight, ask
 
-app.include_router(exceptions.router, prefix=settings.api_prefix, tags=["exceptions"])
-app.include_router(shipments.router, prefix=settings.api_prefix, tags=["shipments"])
-app.include_router(decisions.router, prefix=settings.api_prefix, tags=["decisions"])
-app.include_router(demo.router, prefix=settings.api_prefix, tags=["demo"])
 app.include_router(air_cargo.router, prefix=settings.api_prefix, tags=["air_cargo"])
 app.include_router(road_freight.router, prefix=settings.api_prefix, tags=["road_freight"])
 app.include_router(sea_freight.router, prefix=settings.api_prefix, tags=["sea_freight"])

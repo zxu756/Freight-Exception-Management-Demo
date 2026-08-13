@@ -357,6 +357,67 @@ async def get_air_exceptions(
     }
 
 
+@router.get("/air/exceptions/{exception_id}")
+async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_db)):
+    """Get a single exception with full detail for the four-step AI pipeline view."""
+    exc = db.query(AirException).filter(AirException.exception_id == exception_id).first()
+    if not exc:
+        raise HTTPException(status_code=404, detail="Exception not found")
+
+    waybill = db.query(AirWaybill).filter(AirWaybill.awb_number == exc.awb_number).first()
+
+    from notification_models import ExceptionNotification
+    notifications = db.query(ExceptionNotification).filter(
+        ExceptionNotification.exception_id == exception_id).all()
+
+    return {
+        "exception_id": exc.exception_id,
+        "exception_type": exc.exception_type,
+        "exception_category": exc.exception_category,
+        "root_cause_category": exc.root_cause_category,
+        "severity": exc.severity,
+        "risk_level": exc.risk_level,
+        "risk_score": exc.risk_score,
+        "status": exc.status,
+        "requires_human_approval": exc.requires_human_approval,
+        "root_cause": exc.root_cause,
+        "ai_diagnosis": exc.ai_diagnosis,
+        "ai_confidence": exc.ai_confidence,
+        "business_section": exc.business_section,
+        "classification_confidence": exc.classification_confidence,
+        "classification_decision": exc.classification_decision,
+        "ood_score": exc.ood_score,
+        "is_ood": exc.is_ood,
+        "anomaly_score": exc.anomaly_score,
+        "anomaly_reason": exc.anomaly_reason,
+        "recovery_options": exc.recovery_options,
+        "recommended_action": exc.recommended_action,
+        "recommendation_reason": exc.recommendation_reason,
+        "recovery_cost": exc.recovery_cost,
+        "predicted_downstream_impact": exc.predicted_downstream_impact,
+        "delay_hours": exc.delay_hours,
+        "detected_at": exc.detected_at.isoformat(),
+        "cargo": {
+            "awb_number": waybill.awb_number if waybill else exc.awb_number,
+            "commodity_desc": waybill.commodity_desc if waybill else None,
+            "declared_value_nzd": waybill.declared_value_nzd if waybill else None,
+            "customer_name": waybill.customer_name if waybill else None,
+            "customer_tier": waybill.customer_tier if waybill else None,
+            "route_type": waybill.route_type if waybill else None,
+        },
+        "notifications": [
+            {
+                "notification_id": n.notification_id,
+                "message": n.message,
+                "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
+                "confidence": n.confidence,
+                "sent_at": n.sent_at.isoformat(),
+            }
+            for n in notifications
+        ],
+    }
+
+
 @router.get("/air/dashboard")
 async def get_air_dashboard(db: Session = Depends(get_db)):
     """

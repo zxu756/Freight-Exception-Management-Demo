@@ -998,7 +998,7 @@ class AirCargoSimulator:
 
     def _notify(self, db, exc, customer_name, reference, category, root_cause, recovery, confidence, revised_eta):
         db.add(ExceptionNotification(
-            notification_id=f"NTF-SIM-{self._exc_counter:06d}",
+            notification_id=f"NTF-AIR-{self._exc_counter:06d}",
             mode="air",
             exception_id=exc.exception_id,
             reference=reference,

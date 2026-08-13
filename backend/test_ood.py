@@ -5,6 +5,7 @@ Unit tests for out-of-distribution (OOD) detection in the event classifier.
 import os
 
 os.environ["EVENT_CLASSIFIER_LEARNING"] = "false"
+os.environ["LLM_ENABLED"] = "false"
 
 import pytest
 from event_classifier import classifier

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { Ship, Truck, Plane, Pause, Play } from 'lucide-react';
 import { airAPI, roadAPI, seaAPI } from '../services/api';
 import type { TransportLiveData, TransportDashboardData } from '../types';
@@ -190,7 +191,11 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
               const section = (exc.exception_category as string) ?? (exc.business_section as string) ?? exc.exception_type;
               const aiMismatch = exc.exception_category && exc.business_section && exc.exception_category !== exc.business_section;
               return (
-                <div key={exc.exception_id} className="flex items-start gap-2 text-xs border-b border-gray-50 pb-1.5">
+                <Link
+                  key={exc.exception_id}
+                  to={`/exception/${mode}/${exc.exception_id}`}
+                  className="flex items-start gap-2 text-xs border-b border-gray-50 pb-1.5 hover:bg-gray-50 rounded px-0.5 -mx-0.5"
+                >
                   <span className={`px-1.5 py-0.5 rounded ${riskColor(exc.risk_level)} shrink-0`}>
                     {exc.risk_level}
                   </span>
@@ -211,7 +216,7 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
                     <span className="text-gray-400 mx-1">·</span>
                     <span className="text-gray-500 truncate">{exc.root_cause ?? ''}</span>
                   </div>
-                </div>
+                </Link>
               );
             })}
             {openExceptions.length === 0 && (
