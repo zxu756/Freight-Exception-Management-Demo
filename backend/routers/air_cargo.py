@@ -403,6 +403,16 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
             "declared_value_nzd": waybill.declared_value_nzd if waybill else None,
             "customer_name": waybill.customer_name if waybill else None,
             "customer_tier": waybill.customer_tier if waybill else None,
+            "service_level": waybill.service_level if waybill else None,
+            "sla_tier": waybill.sla_tier if waybill else None,
+            "is_sla_breached": waybill.is_sla_breached if waybill else False,
+            "breach_type": waybill.breach_type if waybill else None,
+            "sla_penalty_nzd": waybill.sla_penalty_nzd if waybill else None,
+            "service_level": waybill.service_level if waybill else None,
+            "sla_tier": waybill.sla_tier if waybill else None,
+            "is_sla_breached": waybill.is_sla_breached if waybill else False,
+            "breach_type": waybill.breach_type if waybill else None,
+            "sla_penalty_nzd": waybill.sla_penalty_nzd if waybill else None,
             "route_type": waybill.route_type if waybill else None,
         },
         "notifications": [
@@ -498,6 +508,13 @@ async def get_air_kpi(db: Session = Depends(get_db)):
         by_category[cat] = by_category.get(cat, 0) + 1
         by_root_cause[rc] = by_root_cause.get(rc, 0) + 1
 
+    delivered = db.query(AirWaybill).filter(AirWaybill.delivered_at.isnot(None)).count()
+    breached = db.query(AirWaybill).filter(AirWaybill.is_sla_breached == True).count()
+    excused = db.query(AirWaybill).filter(AirWaybill.breach_type == "excused").count()
+    otd_rate = round((delivered - breached - excused) / delivered, 3) if delivered else None
+    sla_breach_rate = round(breached / delivered, 3) if delivered else None
+    excused_rate = round(excused / delivered, 3) if delivered else None
+
     return {
         "total": total,
         "automation_rate": round(diagnosed / total, 3),
@@ -505,7 +522,9 @@ async def get_air_kpi(db: Session = Depends(get_db)):
         "escalation_rate": round(escalated / total, 3),
         "high_risk_rate": round(high_risk / total, 3),
         "ood_rate": round(ood / total, 3),
-        "sla_breach_rate": round(high_risk / total, 3),
+        "sla_breach_rate": sla_breach_rate,
+        "excused_rate": excused_rate,
+        "otd_rate": otd_rate,
         "by_category": by_category,
         "by_root_cause": by_root_cause,
     }

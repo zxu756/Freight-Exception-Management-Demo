@@ -110,6 +110,10 @@ class AirWaybill(Base):
     scheduled_delivery = Column(DateTime, nullable=False)
     estimated_delivery = Column(DateTime, nullable=True)  # 更新后的预计送达
     sla_deadline = Column(DateTime, nullable=False)
+    sla_grace_deadline = Column(DateTime, nullable=True)  # 宽限截止
+    is_sla_breached = Column(Boolean, default=False)  # 是否 SLA 违约
+    breach_type = Column(String(20), nullable=True)  # 'excused' / 'unexcused'
+    sla_penalty_nzd = Column(Float, nullable=True)  # 违约金（NZD）
     delivered_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -209,6 +213,8 @@ class AirException(Base):
     recovery_cost = Column(Float, nullable=True)  # 恢复成本（NZD）
     recommended_action = Column(String(50), nullable=True)  # AI 选中的最佳恢复行动
     recommendation_reason = Column(Text, nullable=True)  # 推荐理由
+    sla_clock_paused = Column(Boolean, default=False)  # 客户义务未履行，SLA 时钟暂停
+    pause_reason = Column(String(20), nullable=True)  # 暂停原因（CU-01~CU-10）
     resolved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -34,6 +34,9 @@ from config import settings
 from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery
 from notification_models import ExceptionNotification, build_customer_notification
 from llm_client import enhance_diagnosis
+from sla_models import get_policy, determine_breach, estimate_penalty, map_service_level_to_tier, is_excused, evaluate_breach
+from environment_events import generate_event, get_active_events_for_route
+from environment_models import EVENT_TYPE_TO_REASON, SEVERITY_DELAY_MINUTES
 from anomaly_detector import detector
 
 # ============================================================
@@ -125,6 +128,32 @@ DELAY_REASONS = [
     ("breakdown", 0.12), ("driver_hours", 0.10), ("accident", 0.06),
 ]
 
+# 线路级延误原因 profile（真实地理特征）：
+# 库克海峡渡轮大风停航、亚瑟山口积雪封路、金三角拥堵、跨岛含渡轮
+ROUTE_DELAY_PROFILES = {
+    ("WLG", "PIC"): [("ferry", 0.55), ("weather", 0.35), ("congestion", 0.10)],
+    ("PIC", "WLG"): [("ferry", 0.55), ("weather", 0.35), ("congestion", 0.10)],
+    ("CHC", "GBM"): [("weather", 0.45), ("road_closure", 0.35), ("accident", 0.10), ("breakdown", 0.10)],
+    ("GBM", "CHC"): [("weather", 0.45), ("road_closure", 0.35), ("accident", 0.10), ("breakdown", 0.10)],
+    ("AKL", "HLZ"): [("congestion", 0.55), ("weather", 0.20), ("accident", 0.15), ("breakdown", 0.10)],
+    ("HLZ", "AKL"): [("congestion", 0.55), ("weather", 0.20), ("accident", 0.15), ("breakdown", 0.10)],
+    ("AKL", "TRG"): [("congestion", 0.50), ("weather", 0.20), ("accident", 0.15), ("breakdown", 0.15)],
+    ("TRG", "AKL"): [("congestion", 0.50), ("weather", 0.20), ("accident", 0.15), ("breakdown", 0.15)],
+    ("AKL", "CHC"): [("ferry", 0.35), ("weather", 0.30), ("congestion", 0.15), ("road_closure", 0.10), ("breakdown", 0.10)],
+    ("CHC", "AKL"): [("ferry", 0.35), ("weather", 0.30), ("congestion", 0.15), ("road_closure", 0.10), ("breakdown", 0.10)],
+    ("AKL", "DUD"): [("ferry", 0.35), ("weather", 0.30), ("congestion", 0.15), ("road_closure", 0.10), ("breakdown", 0.10)],
+    ("DUD", "AKL"): [("ferry", 0.35), ("weather", 0.30), ("congestion", 0.15), ("road_closure", 0.10), ("breakdown", 0.10)],
+    ("WLG", "CHC"): [("ferry", 0.45), ("weather", 0.35), ("congestion", 0.20)],
+    ("CHC", "WLG"): [("ferry", 0.45), ("weather", 0.35), ("congestion", 0.20)],
+    ("AKL", "ZQN"): [("weather", 0.40), ("ferry", 0.30), ("congestion", 0.15), ("road_closure", 0.15)],
+    ("ZQN", "AKL"): [("weather", 0.40), ("ferry", 0.30), ("congestion", 0.15), ("road_closure", 0.15)],
+}
+
+
+def get_delay_reasons(org, dst):
+    """Return route-specific delay reasons, or the default distribution."""
+    return ROUTE_DELAY_PROFILES.get((org, dst), DELAY_REASONS)
+
 
 class RoadFreightSimulator:
     """Live road freight operations simulator running as a background thread."""
@@ -142,6 +171,8 @@ class RoadFreightSimulator:
         self._pending = []
         self._pending_seq = 0
         self._last_cleanup_sim = self.sim_now
+        self._last_env_event_sim = self.sim_now
+        self._active_events = {}  # location -> [EnvironmentEvent]（内存缓存）
         self.trips_generated = 0
         self.consignments_generated = 0
         self.exceptions_generated = 0
@@ -306,11 +337,37 @@ class RoadFreightSimulator:
                 self._spawn_due_trips()
                 self._process_pending(db)
                 self._derive_trip_statuses(db)
+                if (self.sim_now - self._last_env_event_sim) > timedelta(hours=2):
+                    self._generate_env_events(db)
+                    self._cleanup_env_events()
+                    self._last_env_event_sim = self.sim_now
                 if (self.sim_now - self._last_cleanup_sim) > timedelta(hours=1):
                     self._cleanup(db)
                     self._last_cleanup_sim = self.sim_now
             finally:
                 db.close()
+
+    def _generate_env_events(self, db):
+        """持续生成环境事件（暴雨/封路/事故）"""
+        from environment_events import ROAD_LOCATIONS
+        for _ in range(random.randint(1, 2)):
+            loc = random.choice(ROAD_LOCATIONS)
+            event = generate_event(db, "road", loc, self.sim_now)
+            if event:
+                self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at})
+        db.commit()
+
+    def _cleanup_env_events(self):
+        """清理过期的环境事件"""
+        now = self.sim_now
+        for loc in list(self._active_events.keys()):
+            self._active_events[loc] = [e for e in self._active_events[loc] if e["ends_at"] >= now]
+            if not self._active_events[loc]:
+                del self._active_events[loc]
+
+    def _route_active_events(self, org, dst):
+        """查路线起终点是否有活跃环境事件"""
+        return self._active_events.get(org, []) + self._active_events.get(dst, [])
 
     def _spawn_due_trips(self):
         for org, dst, freq, carrier, vt in ROAD_ROUTES:
@@ -354,13 +411,18 @@ class RoadFreightSimulator:
         cancelled = not is_inter_island and random.random() < 0.008
 
         if not cancelled:
-            if is_inter_island and random.random() < 0.08:
+            # 环境事件驱动延误：查路线起终点是否有活跃事件
+            events = self._route_active_events(org, dst)
+            if events:
+                event = random.choice(events)
+                delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
+                delay_reason = EVENT_TYPE_TO_REASON.get(event["event_type"], "weather")
+            elif is_inter_island and random.random() < 0.05:
                 delay_minutes = int(random.choice([180, 240, 300, 360, 420, 540, 720]))
                 delay_reason = "ferry"
-            elif random.random() < 0.14:
-                delay_minutes = int(random.choice([15, 20, 30, 40, 45, 60, 90, 120, 150, 180, 240, 300]))
-                delay_reason = random.choices([r[0] for r in DELAY_REASONS],
-                                              weights=[r[1] for r in DELAY_REASONS])[0]
+            elif random.random() < 0.03:
+                delay_minutes = int(random.choice([15, 20, 30, 40, 45, 60, 90, 120]))
+                delay_reason = random.choice(["breakdown", "driver_hours"])
 
         distance = road_distance(org, dst)
         capacity = VEHICLE_CAPACITY.get(vehicle_type, 15000)
@@ -443,19 +505,20 @@ class RoadFreightSimulator:
         elif tier == "VIP" and random.random() < 0.7:
             tier = "high"
 
-        service = "express" if (random.random() < 0.18) else "standard"
+        service = random.choices(["priority", "standard", "economy"], weights=[0.18, 0.62, 0.2])[0]
         priority = "normal"
         if "urgent" in desc or random.random() < 0.06:
             priority = "critical"
         elif tier in ("VIP", "high") and random.random() < 0.3:
             priority = "high"
         if priority == "critical":
-            service = "express"
+            service = "priority"
 
         dur_hours = trip_duration_hours(org, dst, is_inter_island)
         sla_h = max(6.0, round(dur_hours * random.choice([0.9, 1.1, 1.3, 1.5]), 1))
-        if service == "express":
+        if service == "priority":
             sla_h = max(4.0, sla_h * 0.6)
+        policy = get_policy("road", service)
 
         temp_min, temp_max = None, None
         if temp:
@@ -475,7 +538,7 @@ class RoadFreightSimulator:
             customer_name=customer, customer_tier=tier,
             declared_value_nzd=float(value), service_level=service,
             priority=priority,
-            sla_tier={"VIP": "gold", "high": "gold", "medium": "silver", "low": "bronze"}[tier],
+            sla_tier=map_service_level_to_tier(service),
             temp_required_c=temp_min if (vt == "refrigerated" and temp_min is not None) else None,
             temp_min_c=temp_min, temp_max_c=temp_max,
             dg_class="3" if "DGR3" in desc else None,
@@ -484,6 +547,7 @@ class RoadFreightSimulator:
             scheduled_delivery=eff_arr + timedelta(hours=delivery_buffer),
             estimated_delivery=eff_arr + timedelta(hours=delivery_buffer),
             sla_deadline=dep + timedelta(hours=sla_h),
+            sla_grace_deadline=dep + timedelta(hours=sla_h) + timedelta(hours=policy["grace_hours"]),
         )
         db.add(cons)
         db.flush()
@@ -725,6 +789,20 @@ class RoadFreightSimulator:
         c.current_location = c.destination_depot
         c.delivered_at = self.sim_now
         self._insert_event(db, cn, "POD", "Proof of delivery signed", c.destination_depot)
+        # SLA 违约判定
+        policy = get_policy("road", c.service_level or "standard")
+        excused = False
+        for e in db.query(RoadException).filter(RoadException.consignment_number == cn).all():
+            if is_excused(e.exception_type, None) or any(k in (e.root_cause or "").lower() for k in ("weather", "road closure", "ferry", "slip")):
+                excused = True
+                break
+        is_breached, breach_type, penalty = evaluate_breach(
+            c.delivered_at, c.sla_deadline, policy["grace_hours"], policy["penalty_pct"],
+            c.declared_value_nzd, excused)
+        if is_breached or breach_type:
+            c.is_sla_breached = is_breached
+            c.breach_type = breach_type
+            c.sla_penalty_nzd = penalty
 
     def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
         eff_delivery = consignment.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
@@ -783,6 +861,8 @@ class RoadFreightSimulator:
             recovery_cost=cost,
             recommended_action=best_action,
             recommendation_reason=action_reason,
+            sla_clock_paused=exc_type == "failed_delivery",
+            pause_reason="CU-06" if exc_type == "failed_delivery" else None,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1

@@ -12,6 +12,8 @@ import air_cargo_models  # noqa: F401  # Register air cargo tables on Base.metad
 import road_freight_models  # noqa: F401  # Register road freight tables on Base.metadata
 import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.metadata
 import notification_models  # noqa: F401  # Register customer notification table
+import sla_models  # noqa: F401  # Register SLA policy table
+import environment_models  # noqa: F401  # Register environmental event table
 
 
 # Create database tables on startup
@@ -51,6 +53,25 @@ def _migrate_ml_fields():
             if "recommendation_reason" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN recommendation_reason TEXT"))
 
+    # SLA columns on cargo tables
+    for table in ["air_waybills", "road_consignments", "sea_containers"]:
+        if table not in insp.get_table_names():
+            continue
+        cols = {c["name"] for c in insp.get_columns(table)}
+        with engine.begin() as conn:
+            if "service_level" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN service_level VARCHAR(20)"))
+            if "sla_tier" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN sla_tier VARCHAR(20)"))
+            if "sla_grace_deadline" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN sla_grace_deadline DATETIME"))
+            if "is_sla_breached" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN is_sla_breached BOOLEAN DEFAULT 0"))
+            if "breach_type" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN breach_type VARCHAR(20)"))
+            if "sla_penalty_nzd" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN sla_penalty_nzd FLOAT"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,6 +80,13 @@ async def lifespan(app: FastAPI):
     print("Creating database tables...")
     Base.metadata.create_all(bind=engine)
     _migrate_ml_fields()
+    from sla_seed import seed_sla_policies
+    from database import SessionLocal as _S
+    _db = _S()
+    try:
+        seed_sla_policies(_db)
+    finally:
+        _db.close()
     print("Database initialized successfully")
 
     # Start live air cargo simulator

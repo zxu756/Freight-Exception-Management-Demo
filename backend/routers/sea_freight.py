@@ -330,6 +330,11 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
             "declared_value_nzd": container.declared_value_nzd if container else None,
             "customer_name": container.customer_name if container else None,
             "customer_tier": container.customer_tier if container else None,
+            "service_level": container.service_level if container else None,
+            "sla_tier": container.sla_tier if container else None,
+            "is_sla_breached": container.is_sla_breached if container else False,
+            "breach_type": container.breach_type if container else None,
+            "sla_penalty_nzd": container.sla_penalty_nzd if container else None,
             "size": container.size if container else None,
             "direction": container.direction if container else None,
         },
@@ -417,6 +422,14 @@ async def get_sea_kpi(db: Session = Depends(get_db)):
         by_category[cat] = by_category.get(cat, 0) + 1
         by_root_cause[rc] = by_root_cause.get(rc, 0) + 1
 
+    # SLA 指标（基于已交付集装箱）
+    delivered = db.query(SeaContainer).filter(SeaContainer.delivered_at.isnot(None)).count()
+    breached = db.query(SeaContainer).filter(SeaContainer.is_sla_breached == True).count()
+    excused = db.query(SeaContainer).filter(SeaContainer.breach_type == "excused").count()
+    otd_rate = round((delivered - breached - excused) / delivered, 3) if delivered else None
+    sla_breach_rate = round(breached / delivered, 3) if delivered else None
+    excused_rate = round(excused / delivered, 3) if delivered else None
+
     return {
         "total": total,
         "automation_rate": round(diagnosed / total, 3),
@@ -424,7 +437,9 @@ async def get_sea_kpi(db: Session = Depends(get_db)):
         "escalation_rate": round(escalated / total, 3),
         "high_risk_rate": round(high_risk / total, 3),
         "ood_rate": round(ood / total, 3),
-        "sla_breach_rate": round(high_risk / total, 3),  # high risk ≈ likely SLA breach
+        "sla_breach_rate": sla_breach_rate,
+        "excused_rate": excused_rate,
+        "otd_rate": otd_rate,
         "by_category": by_category,
         "by_root_cause": by_root_cause,
     }

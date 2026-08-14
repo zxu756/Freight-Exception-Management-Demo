@@ -86,6 +86,8 @@ class SeaContainer(Base):
     customer_name = Column(String(200), nullable=False)
     customer_tier = Column(String(20), nullable=False)  # 'VIP', 'high', 'medium', 'low'
     declared_value_nzd = Column(Float, nullable=False)
+    service_level = Column(String(20), nullable=True)  # 'priority', 'standard', 'economy'
+    sla_tier = Column(String(20), nullable=True)  # 'priority', 'standard', 'economy'
 
     # Special handling
     temp_required_c = Column(Float, nullable=True)
@@ -104,6 +106,10 @@ class SeaContainer(Base):
     scheduled_delivery = Column(DateTime, nullable=True)
     estimated_delivery = Column(DateTime, nullable=True)
     sla_deadline = Column(DateTime, nullable=True)
+    sla_grace_deadline = Column(DateTime, nullable=True)  # 宽限截止
+    is_sla_breached = Column(Boolean, default=False)  # 是否 SLA 违约
+    breach_type = Column(String(20), nullable=True)  # 'excused' / 'unexcused'
+    sla_penalty_nzd = Column(Float, nullable=True)  # 违约金（NZD）
     discharged_at = Column(DateTime, nullable=True)
     available_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
@@ -177,6 +183,8 @@ class SeaException(Base):
     recovery_cost = Column(Float, nullable=True)  # 恢复成本（NZD）
     recommended_action = Column(String(50), nullable=True)  # AI 选中的最佳恢复行动
     recommendation_reason = Column(Text, nullable=True)  # 推荐理由
+    sla_clock_paused = Column(Boolean, default=False)  # 客户义务未履行，SLA 时钟暂停
+    pause_reason = Column(String(20), nullable=True)  # 暂停原因（CU-01~CU-10）
     resolved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

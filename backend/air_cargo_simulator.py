@@ -29,6 +29,9 @@ from config import settings
 from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery
 from notification_models import ExceptionNotification, build_customer_notification
 from llm_client import enhance_diagnosis
+from sla_models import get_policy, determine_breach, estimate_penalty, map_service_level_to_tier, is_excused, evaluate_breach
+from environment_events import generate_event, get_active_events_for_route
+from environment_models import EVENT_TYPE_TO_REASON, SEVERITY_DELAY_MINUTES
 from anomaly_detector import detector
 
 # ============================================================
@@ -251,6 +254,30 @@ DELAY_REASONS = [
     ("volcanic_ash", 0.05), ("security", 0.05), ("air_traffic", 0.05),
 ]
 
+# 航线级延误原因 profile（真实地理特征）：
+# 皇后镇冬季雾雪、国际长航线天气/空管/技术、跨塔斯曼天气/空管、太平洋岛国天气
+ROUTE_DELAY_PROFILES = {
+    ("AKL", "ZQN"): [("weather", 0.55), ("air_traffic", 0.20), ("technical", 0.15), ("crew", 0.10)],
+    ("ZQN", "AKL"): [("weather", 0.55), ("air_traffic", 0.20), ("technical", 0.15), ("crew", 0.10)],
+    ("CHC", "ZQN"): [("weather", 0.50), ("air_traffic", 0.20), ("technical", 0.15), ("crew", 0.15)],
+    ("ZQN", "CHC"): [("weather", 0.50), ("air_traffic", 0.20), ("technical", 0.15), ("crew", 0.15)],
+    ("AKL", "PVG"): [("weather", 0.30), ("air_traffic", 0.25), ("technical", 0.25), ("crew", 0.10), ("congestion", 0.10)],
+    ("PVG", "AKL"): [("weather", 0.30), ("air_traffic", 0.25), ("technical", 0.25), ("crew", 0.10), ("congestion", 0.10)],
+    ("AKL", "LAX"): [("weather", 0.35), ("technical", 0.25), ("air_traffic", 0.20), ("crew", 0.10), ("congestion", 0.10)],
+    ("LAX", "AKL"): [("weather", 0.35), ("technical", 0.25), ("air_traffic", 0.20), ("crew", 0.10), ("congestion", 0.10)],
+    ("AKL", "SYD"): [("weather", 0.40), ("air_traffic", 0.30), ("technical", 0.15), ("crew", 0.15)],
+    ("SYD", "AKL"): [("weather", 0.40), ("air_traffic", 0.30), ("technical", 0.15), ("crew", 0.15)],
+    ("AKL", "DXB"): [("weather", 0.30), ("air_traffic", 0.30), ("technical", 0.25), ("crew", 0.15)],
+    ("DXB", "AKL"): [("weather", 0.30), ("air_traffic", 0.30), ("technical", 0.25), ("crew", 0.15)],
+    ("AKL", "NAN"): [("weather", 0.45), ("air_traffic", 0.25), ("technical", 0.20), ("crew", 0.10)],
+    ("NAN", "AKL"): [("weather", 0.45), ("air_traffic", 0.25), ("technical", 0.20), ("crew", 0.10)],
+}
+
+
+def get_delay_reasons(org, dst):
+    """Return route-specific delay reasons, or the default distribution."""
+    return ROUTE_DELAY_PROFILES.get((org, dst), DELAY_REASONS)
+
 
 class AirCargoSimulator:
     """Live air cargo operations simulator running as a background thread."""
@@ -268,6 +295,8 @@ class AirCargoSimulator:
         self._pending = []
         self._pending_seq = 0
         self._last_cleanup_sim = self.sim_now
+        self._last_env_event_sim = self.sim_now
+        self._active_events = {}  # location -> [EnvironmentEvent]
         self.flights_generated = 0
         self.waybills_generated = 0
         self.exceptions_generated = 0
@@ -466,11 +495,34 @@ class AirCargoSimulator:
                 self._spawn_due_flights()
                 self._process_pending(db)
                 self._derive_flight_statuses(db)
+                if (self.sim_now - self._last_env_event_sim) > timedelta(hours=2):
+                    self._generate_env_events(db)
+                    self._cleanup_env_events()
+                    self._last_env_event_sim = self.sim_now
                 if (self.sim_now - self._last_cleanup_sim) > timedelta(hours=1):
                     self._cleanup(db)
                     self._last_cleanup_sim = self.sim_now
             finally:
                 db.close()
+
+    def _generate_env_events(self, db):
+        from environment_events import AIR_LOCATIONS
+        for _ in range(random.randint(1, 2)):
+            loc = random.choice(AIR_LOCATIONS)
+            event = generate_event(db, "air", loc, self.sim_now)
+            if event:
+                self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at})
+        db.commit()
+
+    def _cleanup_env_events(self):
+        now = self.sim_now
+        for loc in list(self._active_events.keys()):
+            self._active_events[loc] = [e for e in self._active_events[loc] if e["ends_at"] >= now]
+            if not self._active_events[loc]:
+                del self._active_events[loc]
+
+    def _route_active_events(self, org, dst):
+        return self._active_events.get(org, []) + self._active_events.get(dst, [])
 
     def _spawn_due_flights(self):
         routes = DOMESTIC_ROUTES + INTL_ROUTES
@@ -517,10 +569,16 @@ class AirCargoSimulator:
         cancelled = is_domestic and random.random() < 0.015
         delay_minutes = 0
         delay_reason = None
-        if not cancelled and random.random() < 0.10:
-            delay_minutes = int(random.choice([15, 20, 25, 30, 35, 40, 45, 55, 60, 75, 90, 120, 150, 180, 240]))
-            delay_reason = random.choices([r[0] for r in DELAY_REASONS],
-                                          weights=[r[1] for r in DELAY_REASONS])[0]
+        if not cancelled:
+            # 环境事件驱动延误：查起降机场是否有活跃事件
+            events = self._route_active_events(org, dst)
+            if events:
+                event = random.choice(events)
+                delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
+                delay_reason = EVENT_TYPE_TO_REASON.get(event["event_type"], "weather")
+            elif random.random() < 0.03:
+                delay_minutes = int(random.choice([15, 20, 25, 30, 35, 40, 45, 55, 60, 75, 90, 120]))
+                delay_reason = random.choice(["technical", "crew", "security"])
 
         capacity = self._aircraft_capacity(aircraft)
         flight_number = self._unique_flight_number(airline)
@@ -600,18 +658,19 @@ class AirCargoSimulator:
         elif tier == "VIP" and random.random() < 0.7:
             tier = "high"
 
-        service = "express" if (random.random() < 0.2) else "standard"
+        service = random.choices(["priority", "standard", "economy"], weights=[0.2, 0.6, 0.2])[0]
         priority = "normal"
         if "urgent" in desc or "AOG" in desc or random.random() < 0.08:
             priority = "critical"
         elif tier in ("VIP", "high") and random.random() < 0.3:
             priority = "high"
         if priority == "critical":
-            service = "express"
+            service = "priority"
 
         sla_h = {"domestic": random.choice([10, 24]), "international": random.choice([36, 48, 60, 72])}[route_type]
-        if service == "express":
+        if service == "priority":
             sla_h = max(8, sla_h // 2)
+        policy = get_policy("air", service)
 
         temp_min, temp_max = None, None
         if temp:
@@ -638,7 +697,7 @@ class AirCargoSimulator:
             customer_name=customer, customer_tier=tier,
             declared_value_nzd=float(value), service_level=service,
             priority=priority,
-            sla_tier={"VIP": "gold", "high": "gold", "medium": "silver", "low": "bronze"}[tier],
+            sla_tier=map_service_level_to_tier(service),
             special_handling_codes=shc,
             dg_class="3" if "DGR3" in desc else ("9" if "DGR9" in desc else None),
             un_number="UN1133" if "DGR3" in desc else ("UN3480" if "DGR9" in desc else None),
@@ -649,6 +708,7 @@ class AirCargoSimulator:
             scheduled_delivery=eff_arr + timedelta(hours=delivery_buffer),
             estimated_delivery=eff_arr + timedelta(hours=delivery_buffer),
             sla_deadline=dep + timedelta(hours=sla_h),
+            sla_grace_deadline=dep + timedelta(hours=sla_h) + timedelta(hours=policy["grace_hours"]),
         )
         db.add(waybill)
         db.flush()
@@ -931,6 +991,20 @@ class AirCargoSimulator:
         w.current_location = w.destination_airport
         w.delivered_at = self.sim_now
         self._insert_event(db, awb, "DLV", "Delivered to consignee", w.destination_airport)
+        # SLA 违约判定
+        policy = get_policy("air", w.service_level or "standard")
+        excused = False
+        for e in db.query(AirException).filter(AirException.awb_number == awb).all():
+            if is_excused(e.exception_type, None) or any(k in (e.root_cause or "").lower() for k in ("weather", "road closure", "ferry", "slip")):
+                excused = True
+                break
+        is_breached, breach_type, penalty = evaluate_breach(
+            w.delivered_at, w.sla_deadline, policy["grace_hours"], policy["penalty_pct"],
+            w.declared_value_nzd, excused)
+        if is_breached or breach_type:
+            w.is_sla_breached = is_breached
+            w.breach_type = breach_type
+            w.sla_penalty_nzd = penalty
 
     def _create_exception(self, db, waybill, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
         eff_delivery = waybill.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
@@ -987,6 +1061,8 @@ class AirCargoSimulator:
             recovery_cost=cost,
             recommended_action=best_action,
             recommendation_reason=action_reason,
+            sla_clock_paused=exc_type == "failed_delivery",
+            pause_reason="CU-06" if exc_type == "failed_delivery" else None,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1

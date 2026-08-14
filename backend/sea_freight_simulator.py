@@ -33,6 +33,9 @@ from config import settings
 from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery
 from notification_models import ExceptionNotification, build_customer_notification
 from llm_client import enhance_diagnosis
+from sla_models import get_policy, determine_breach, estimate_penalty, map_service_level_to_tier, is_excused, evaluate_breach
+from environment_events import generate_event, get_active_events_for_route
+from environment_models import EVENT_TYPE_TO_REASON, SEVERITY_DELAY_MINUTES
 from anomaly_detector import detector
 
 # 活跃窗口：为 arrival 落在该窗口内的船生成集装箱
@@ -47,6 +50,21 @@ DELAY_REASONS = [
     ("port_congestion", 0.35), ("weather", 0.25), ("berth_unavailable", 0.15),
     ("mechanical", 0.10), ("labour", 0.10),
 ]
+
+# 港口级延误原因 profile（真实地理特征）：
+# 奥克兰/陶朗加大港拥堵、惠灵顿/南岛港大风天气
+PORT_DELAY_PROFILES = {
+    "NZAKL": [("port_congestion", 0.50), ("weather", 0.20), ("berth_unavailable", 0.15), ("labour", 0.10), ("mechanical", 0.05)],
+    "NZTRG": [("port_congestion", 0.45), ("weather", 0.20), ("berth_unavailable", 0.15), ("labour", 0.10), ("mechanical", 0.10)],
+    "NZWLG": [("weather", 0.45), ("port_congestion", 0.25), ("berth_unavailable", 0.15), ("labour", 0.10), ("mechanical", 0.05)],
+    "NZLYT": [("weather", 0.35), ("port_congestion", 0.30), ("berth_unavailable", 0.15), ("labour", 0.10), ("mechanical", 0.10)],
+    "NZTIU": [("weather", 0.35), ("port_congestion", 0.25), ("berth_unavailable", 0.20), ("labour", 0.10), ("mechanical", 0.10)],
+}
+
+
+def get_delay_reasons(port_code):
+    """Return port-specific delay reasons, or the default distribution."""
+    return PORT_DELAY_PROFILES.get(port_code, DELAY_REASONS)
 
 
 class SeaFreightSimulator:
@@ -65,6 +83,8 @@ class SeaFreightSimulator:
         self._pending_seq = 0
         self._last_cleanup_sim = self.sim_now
         self._last_missing_check_sim = self.sim_now
+        self._last_env_event_sim = self.sim_now
+        self._active_events = {}  # location -> [EnvironmentEvent]
         self._generated_vessels = set()
         self._loaded_vessels = False
         self.vessels_loaded = 0
@@ -218,14 +238,20 @@ class SeaFreightSimulator:
         if visit.vessel_visit_id in self._generated_vessels:
             return
         self._generated_vessels.add(visit.vessel_visit_id)
-        # 船舶延误注入 (~8% for EXPECTED vessels)
-        if visit.vessel_status == "EXPECTED" and random.random() < 0.08:
-            delay_minutes = int(random.choice([120, 180, 240, 360, 480, 720, 1440]))
-            visit.delay_minutes = delay_minutes
-            visit.delay_reason_code = random.choices(
-                [r[0] for r in DELAY_REASONS], weights=[r[1] for r in DELAY_REASONS])[0]
-            if visit.departure_datetime:
-                visit.departure_datetime += timedelta(minutes=delay_minutes)
+        # 环境事件驱动船舶延误
+        if visit.vessel_status == "EXPECTED":
+            events = self._active_events.get(visit.port_code, [])
+            if events:
+                event = random.choice(events)
+                delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
+                visit.delay_minutes = delay_minutes
+                visit.delay_reason_code = EVENT_TYPE_TO_REASON.get(event["event_type"], "port_congestion")
+            elif random.random() < 0.03:
+                delay_minutes = int(random.choice([120, 180, 240, 360, 480]))
+                visit.delay_minutes = delay_minutes
+                visit.delay_reason_code = random.choice(["berth_unavailable", "labour", "mechanical"])
+            if visit.delay_minutes and visit.departure_datetime:
+                visit.departure_datetime += timedelta(minutes=visit.delay_minutes)
         n = random.randint(20, 60)
         for _ in range(n):
             self._create_container(db, visit)
@@ -260,6 +286,9 @@ class SeaFreightSimulator:
         elif tier == "VIP" and random.random() < 0.7:
             tier = "high"
 
+        service_level = random.choices(["priority", "standard", "economy"], weights=[0.2, 0.6, 0.2])[0]
+        policy = get_policy("sea", service_level)
+
         temp_min, temp_max = (None, None)
         if temp:
             temp_min, temp_max = temp
@@ -270,17 +299,20 @@ class SeaFreightSimulator:
 
         arrival = visit.arrival_datetime or self.sim_now
         is_dg = "DGR" in desc
+        sla_deadline = arrival + timedelta(hours=policy["transit_hours"])
         container = SeaContainer(
             container_number=cn, vessel_visit_id=visit.vessel_visit_id,
             direction=direction, size=size, container_type=ctype,
             gross_weight_kg=weight, commodity_code=hs, commodity_desc=desc,
             customer_name=customer, customer_tier=tier,
             declared_value_nzd=float(value),
+            service_level=service_level, sla_tier=service_level,
             temp_required_c=temp_min, temp_min_c=temp_min, temp_max_c=temp_max,
             is_dg=is_dg, dg_class="3" if is_dg else None, un_number="UN1133" if is_dg else None,
             current_status="at_sea",
-            scheduled_delivery=arrival + timedelta(hours=random.randint(36, 72)),
-            sla_deadline=arrival + timedelta(hours=random.randint(60, 96)),
+            scheduled_delivery=arrival + timedelta(hours=policy["transit_hours"]),
+            sla_deadline=sla_deadline,
+            sla_grace_deadline=sla_deadline + timedelta(hours=policy["grace_hours"]),
         )
         db.add(container)
         db.flush()
@@ -314,21 +346,30 @@ class SeaFreightSimulator:
         port = visit.port_code
         vid = visit.vessel_visit_id
 
+        # 服务等级影响交付链时长：priority 清关/交付更快，economy 更慢
+        svc = container.service_level or "standard"
+        if svc == "priority":
+            dis_h, avail_h, gate_h, deliv_h = (3, 5), (8, 20), (4, 12), (6, 24)
+        elif svc == "economy":
+            dis_h, avail_h, gate_h, deliv_h = (5, 12), (30, 60), (12, 36), (24, 72)
+        else:
+            dis_h, avail_h, gate_h, deliv_h = (3, 8), (18, 40), (6, 24), (12, 48)
+
         self._push(arrival, "vessel_arrive", (vid,))
-        dis = arrival + timedelta(hours=random.randint(3, 8))
+        dis = arrival + timedelta(hours=random.randint(*dis_h))
         self._push(dis, "discharge", (cn, port, dis))
 
-        # 正常 18-40h 可提取；5% 异常长停留（55-90h，压港/清关延误），供 dwell-time 异常检测发现
+        # 5% 异常长停留（压港/清关延误），供 dwell-time 异常检测发现
         if random.random() < 0.05:
             avail = dis + timedelta(hours=random.randint(55, 90))
         else:
-            avail = dis + timedelta(hours=random.randint(18, 40))
+            avail = dis + timedelta(hours=random.randint(*avail_h))
         self._push(avail, "available", (cn, port, avail))
 
-        gate_out = avail + timedelta(hours=random.randint(6, 24))
+        gate_out = avail + timedelta(hours=random.randint(*gate_h))
         self._push(gate_out, "gate_out", (cn, port))
 
-        delivered = gate_out + timedelta(hours=random.randint(12, 48))
+        delivered = gate_out + timedelta(hours=random.randint(*deliv_h))
         self._push(delivered, "deliver", (cn, port))
 
         # 海关扣留 (进口，~12%)
@@ -468,6 +509,20 @@ class SeaFreightSimulator:
             anomaly = detector.observe("sea", "AVC_DLV", dwell)
             if anomaly:
                 self._create_predicted_exception(db, c, anomaly, "AVC->DLV")
+        # SLA 违约判定
+        policy = get_policy("sea", c.service_level or "standard")
+        excused = False
+        for e in db.query(SeaException).filter(SeaException.container_number == cn).all():
+            if is_excused(e.exception_type, None) or any(k in (e.root_cause or "").lower() for k in ("weather", "road closure", "ferry", "slip")):
+                excused = True
+                break
+        is_breached, breach_type, penalty = evaluate_breach(
+            c.delivered_at, c.sla_deadline, policy["grace_hours"], policy["penalty_pct"],
+            c.declared_value_nzd, excused)
+        if is_breached or breach_type:
+            c.is_sla_breached = is_breached
+            c.breach_type = breach_type
+            c.sla_penalty_nzd = penalty
 
     def _on_customs_hold(self, db, payload):
         cn, port = payload
@@ -622,6 +677,8 @@ class SeaFreightSimulator:
             recovery_cost=cost,
             recommended_action=best_action,
             recommendation_reason=action_reason,
+            sla_clock_paused=exc_type == "failed_delivery",
+            pause_reason="CU-06" if exc_type == "failed_delivery" else None,
         )
         self._exc_counter += 1
         self.exceptions_generated += 1
@@ -703,6 +760,10 @@ class SeaFreightSimulator:
                 self._process_pending(db)
                 self._derive_vessel_statuses(db)
                 db.commit()
+                if (self.sim_now - self._last_env_event_sim) > timedelta(hours=2):
+                    self._generate_env_events(db)
+                    self._cleanup_env_events()
+                    self._last_env_event_sim = self.sim_now
                 if (self.sim_now - self._last_missing_check_sim) > timedelta(hours=2):
                     self._run_missing_event_detection(db)
                     self._last_missing_check_sim = self.sim_now
@@ -711,6 +772,22 @@ class SeaFreightSimulator:
                     self._last_cleanup_sim = self.sim_now
             finally:
                 db.close()
+
+    def _generate_env_events(self, db):
+        from environment_events import SEA_LOCATIONS
+        for _ in range(random.randint(1, 2)):
+            loc = random.choice(SEA_LOCATIONS)
+            event = generate_event(db, "sea", loc, self.sim_now)
+            if event:
+                self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at})
+        db.commit()
+
+    def _cleanup_env_events(self):
+        now = self.sim_now
+        for loc in list(self._active_events.keys()):
+            self._active_events[loc] = [e for e in self._active_events[loc] if e["ends_at"] >= now]
+            if not self._active_events[loc]:
+                del self._active_events[loc]
 
     def _run_missing_event_detection(self, db):
         """Flag containers whose next milestone is overdue (missing expected event)."""

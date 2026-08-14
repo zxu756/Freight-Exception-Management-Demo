@@ -336,6 +336,16 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
             "declared_value_nzd": cons.declared_value_nzd if cons else None,
             "customer_name": cons.customer_name if cons else None,
             "customer_tier": cons.customer_tier if cons else None,
+            "service_level": cons.service_level if cons else None,
+            "sla_tier": cons.sla_tier if cons else None,
+            "is_sla_breached": cons.is_sla_breached if cons else False,
+            "breach_type": cons.breach_type if cons else None,
+            "sla_penalty_nzd": cons.sla_penalty_nzd if cons else None,
+            "service_level": cons.service_level if cons else None,
+            "sla_tier": cons.sla_tier if cons else None,
+            "is_sla_breached": cons.is_sla_breached if cons else False,
+            "breach_type": cons.breach_type if cons else None,
+            "sla_penalty_nzd": cons.sla_penalty_nzd if cons else None,
             "route_type": cons.route_type if cons else None,
         },
         "notifications": [
@@ -422,6 +432,13 @@ async def get_road_kpi(db: Session = Depends(get_db)):
         by_category[cat] = by_category.get(cat, 0) + 1
         by_root_cause[rc] = by_root_cause.get(rc, 0) + 1
 
+    delivered = db.query(RoadConsignment).filter(RoadConsignment.delivered_at.isnot(None)).count()
+    breached = db.query(RoadConsignment).filter(RoadConsignment.is_sla_breached == True).count()
+    excused = db.query(RoadConsignment).filter(RoadConsignment.breach_type == "excused").count()
+    otd_rate = round((delivered - breached - excused) / delivered, 3) if delivered else None
+    sla_breach_rate = round(breached / delivered, 3) if delivered else None
+    excused_rate = round(excused / delivered, 3) if delivered else None
+
     return {
         "total": total,
         "automation_rate": round(diagnosed / total, 3),
@@ -429,7 +446,9 @@ async def get_road_kpi(db: Session = Depends(get_db)):
         "escalation_rate": round(escalated / total, 3),
         "high_risk_rate": round(high_risk / total, 3),
         "ood_rate": round(ood / total, 3),
-        "sla_breach_rate": round(high_risk / total, 3),
+        "sla_breach_rate": sla_breach_rate,
+        "excused_rate": excused_rate,
+        "otd_rate": otd_rate,
         "by_category": by_category,
         "by_root_cause": by_root_cause,
     }

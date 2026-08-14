@@ -111,7 +111,17 @@ const ExceptionDetail = () => {
                 {data.cargo?.customer_name ?? '未知客户'}
                 {data.cargo?.customer_tier ? ` · ${data.cargo.customer_tier} 客户` : ''}
                 {data.cargo?.declared_value_nzd ? ` · 货值 $${data.cargo.declared_value_nzd.toLocaleString()}` : ''}
+                {data.cargo?.service_level ? ` · ${data.cargo.service_level} 服务` : ''}
               </p>
+              {data.cargo?.is_sla_breached && (
+                <p className="text-xs text-red-600 mt-1">
+                  SLA 违约（{data.cargo.breach_type === 'excused' ? '已豁免' : '未豁免'}）
+                  {data.cargo.sla_penalty_nzd ? ` · 违约金 $${data.cargo.sla_penalty_nzd.toLocaleString()}` : ''}
+                </p>
+              )}
+              {data.cargo?.breach_type === 'excused' && (
+                <p className="text-xs text-amber-600 mt-1">SLA 豁免（天气/海关等排除项），不计 OTD 但已通知</p>
+              )}
             </div>
             <div className="text-right">
               <p className={`text-lg font-bold ${riskColor(data.risk_level)}`}>
