@@ -8,7 +8,7 @@ from typing import Optional
 
 from database import get_db
 from road_freight_models import (
-    Depot, RoadTrip, RoadConsignment, RoadTrackingEvent, RoadException
+    Depot, RoadTrip, RoadConsignment, RoadTrackingEvent, RoadException, ConsignmentLine
 )
 
 router = APIRouter()
@@ -38,6 +38,29 @@ async def get_depots(
                 "weather": d.weather
             }
             for d in depots
+        ]
+    }
+
+
+@router.get("/road/segments")
+async def get_road_segments(db: Session = Depends(get_db)):
+    """Get live road conditions for all route segments (实时路况)."""
+    from road_freight_models import RoadSegment
+    segments = db.query(RoadSegment).all()
+    if not segments:
+        return {"count": 0, "segments": []}
+    return {
+        "count": len(segments),
+        "segments": [
+            {
+                "origin": s.origin,
+                "destination": s.destination,
+                "condition": s.condition,
+                "speed_factor": s.speed_factor,
+                "description": s.description,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            for s in segments
         ]
     }
 
@@ -153,10 +176,15 @@ async def get_consignment_detail(consignment_number: str, db: Session = Depends(
         RoadException.consignment_number == consignment_number
     ).all()
 
+    cargo_lines = db.query(ConsignmentLine).filter(
+        ConsignmentLine.consignment_number == consignment_number
+    ).order_by(ConsignmentLine.line_number.asc()).all()
+
     return {
         "consignment_number": cons.consignment_number,
         "trip_number": cons.trip_number,
         "route_type": cons.route_type,
+        "is_ltl": cons.is_ltl,
         "origin": cons.origin_depot,
         "destination": cons.destination_depot,
         "commodity": {
@@ -232,6 +260,56 @@ async def get_consignment_detail(consignment_number: str, db: Session = Depends(
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
+        ],
+        "cargo_lines": [
+            {
+                "line_number": l.line_number,
+                "commodity_desc": l.commodity_desc,
+                "commodity_code": l.commodity_code,
+                "customer_name": l.customer_name,
+                "customer_tier": l.customer_tier,
+                "declared_value_nzd": l.declared_value_nzd,
+                "gross_weight_kg": l.gross_weight_kg,
+                "service_level": l.service_level,
+                "sla_deadline": l.sla_deadline.isoformat() if l.sla_deadline else None,
+                "is_sla_breached": l.is_sla_breached,
+                "breach_type": l.breach_type,
+                "sla_penalty_nzd": l.sla_penalty_nzd
+            }
+            for l in cargo_lines
+        ]
+    }
+
+
+@router.get("/road/consignments/{consignment_number}/lines")
+async def get_consignment_lines(consignment_number: str, db: Session = Depends(get_db)):
+    """List the individual cargo lines (LTL consignments) inside a road consignment."""
+    lines = db.query(ConsignmentLine).filter(
+        ConsignmentLine.consignment_number == consignment_number
+    ).order_by(ConsignmentLine.line_number.asc()).all()
+    return {
+        "consignment_number": consignment_number,
+        "count": len(lines),
+        "lines": [
+            {
+                "line_number": l.line_number,
+                "commodity_desc": l.commodity_desc,
+                "commodity_code": l.commodity_code,
+                "customer_name": l.customer_name,
+                "customer_tier": l.customer_tier,
+                "declared_value_nzd": l.declared_value_nzd,
+                "pieces": l.pieces,
+                "gross_weight_kg": l.gross_weight_kg,
+                "service_level": l.service_level,
+                "sla_tier": l.sla_tier,
+                "temp_min_c": l.temp_min_c,
+                "temp_max_c": l.temp_max_c,
+                "sla_deadline": l.sla_deadline.isoformat() if l.sla_deadline else None,
+                "is_sla_breached": l.is_sla_breached,
+                "breach_type": l.breach_type,
+                "sla_penalty_nzd": l.sla_penalty_nzd
+            }
+            for l in lines
         ]
     }
 
@@ -600,3 +678,68 @@ async def control_road_sim(body: dict, db: Session = Depends(get_db)):
         "speed": simulator.speed,
         "sim_now": simulator.sim_now.isoformat()
     }
+
+
+@router.post("/road/env/event")
+async def trigger_road_env_event(body: dict, db: Session = Depends(get_db)):
+    """手动注入一个环境事件（用于演示特定场景，如"奥克兰暴雨"）"""
+    from datetime import timedelta
+    from environment_events import EVENT_TEMPLATES, ROAD_LOCATIONS
+    from environment_models import EnvironmentEvent
+    from road_freight_simulator import simulator
+
+    location = body.get("location", "AKL")
+    if location not in ROAD_LOCATIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown location: {location}")
+    event_type = body.get("event_type", "weather")
+    severity = body.get("severity", "severe")
+    duration_hours = float(body.get("duration_hours", 12))
+
+    templates = EVENT_TEMPLATES.get("road", {})
+    description = body.get("description") or templates.get(event_type, "{loc} 附近异常").format(loc=location)
+
+    now = simulator.sim_now
+    event = EnvironmentEvent(
+        event_type=event_type, mode="road", location=location,
+        severity=severity, description=description,
+        started_at=now, ends_at=now + timedelta(hours=duration_hours),
+    )
+    db.add(event)
+    db.commit()
+    simulator._active_events.setdefault(location, []).append({
+        "event_type": event.event_type, "severity": event.severity,
+        "description": event.description, "ends_at": event.ends_at,
+    })
+    simulator._update_road_conditions(db)
+    return {
+        "success": True,
+        "event": {
+            "event_type": event.event_type, "location": event.location,
+            "severity": event.severity, "description": event.description,
+            "started_at": event.started_at.isoformat(), "ends_at": event.ends_at.isoformat(),
+        }
+    }
+
+@router.get("/road/env/events")
+async def get_road_env_events(db: Session = Depends(get_db)):
+    """查活跃环境事件（实时路况通报）"""
+    from environment_models import EnvironmentEvent
+    from road_freight_simulator import simulator
+    now = simulator.sim_now
+    events = db.query(EnvironmentEvent).filter(
+        EnvironmentEvent.mode == "road",
+        EnvironmentEvent.started_at <= now,
+        EnvironmentEvent.ends_at >= now,
+    ).all()
+    return {
+        "count": len(events),
+        "events": [
+            {
+                "event_type": e.event_type, "location": e.location,
+                "severity": e.severity, "description": e.description,
+                "ends_at": e.ends_at.isoformat(),
+            }
+            for e in events
+        ]
+    }
+

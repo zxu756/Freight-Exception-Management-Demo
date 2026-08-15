@@ -96,6 +96,7 @@ class RoadConsignment(Base):
     service_level = Column(String(20), nullable=False)  # 'same_day', 'express', 'standard'
     priority = Column(String(20), nullable=False, default='normal')  # 'normal', 'high', 'critical'
     sla_tier = Column(String(20), nullable=False, default='silver')  # 'gold', 'silver', 'bronze'
+    is_ltl = Column(Boolean, default=False)  # 拼装：托运单内多票货（各票独立货主/SLA）
 
     # Special handling
     temp_required_c = Column(Float, nullable=True)
@@ -125,6 +126,43 @@ class RoadConsignment(Base):
     destination = relationship("Depot", foreign_keys=[destination_depot])
     events = relationship("RoadTrackingEvent", back_populates="consignment")
     exceptions = relationship("RoadException", back_populates="consignment")
+    cargo_lines = relationship("ConsignmentLine", back_populates="consignment")
+
+
+class ConsignmentLine(Base):
+    """
+    Consignment line - one LTL shipment inside a consolidated road consignment.
+
+    Each line has its own commodity, customer, value and SLA commitment
+    (mirrors CargoLine in sea freight / HouseWaybill in air freight).
+    """
+    __tablename__ = "consignment_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    consignment_number = Column(String(20), ForeignKey("road_consignments.consignment_number"), nullable=False, index=True)
+    line_number = Column(Integer, nullable=False)  # 1-based 票号
+    commodity_code = Column(String(20), nullable=True)  # HS code
+    commodity_desc = Column(Text, nullable=False)
+    shipper_name = Column(String(200), nullable=False)
+    consignee_name = Column(String(200), nullable=False)
+    customer_name = Column(String(200), nullable=False)
+    customer_tier = Column(String(20), nullable=False)  # 'VIP', 'high', 'medium', 'low'
+    declared_value_nzd = Column(Float, nullable=False)
+    pieces = Column(Integer, default=1)
+    gross_weight_kg = Column(Float, nullable=False)
+    service_level = Column(String(20), nullable=False)
+    sla_tier = Column(String(20), nullable=False)
+    temp_min_c = Column(Float, nullable=True)
+    temp_max_c = Column(Float, nullable=True)
+    scheduled_delivery = Column(DateTime, nullable=True)
+    sla_deadline = Column(DateTime, nullable=True)
+    sla_grace_deadline = Column(DateTime, nullable=True)
+    is_sla_breached = Column(Boolean, default=False)
+    breach_type = Column(String(20), nullable=True)
+    sla_penalty_nzd = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    consignment = relationship("RoadConsignment", back_populates="cargo_lines")
 
 
 class RoadTrackingEvent(Base):
@@ -161,6 +199,7 @@ class RoadException(Base):
     id = Column(Integer, primary_key=True, index=True)
     exception_id = Column(String(50), unique=True, nullable=False, index=True)
     consignment_number = Column(String(20), ForeignKey("road_consignments.consignment_number"), nullable=False, index=True)
+    consignment_line_id = Column(Integer, ForeignKey("consignment_lines.id"), nullable=True, index=True)  # 票级异常归属
     exception_type = Column(String(50), nullable=False)
     # 'delay', 'road_closure', 'breakdown', 'accident', 'driver_hours', 'temp_excursion', 'ferry_delay', 'overweight'
     severity = Column(String(20), nullable=False)  # 'low', 'medium', 'high', 'critical'
@@ -196,3 +235,19 @@ class RoadException(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     consignment = relationship("RoadConsignment", back_populates="exceptions")
+
+
+class RoadSegment(Base):
+    """
+    Live road condition for a route segment (实时路况).
+    路段实时路况 - clear/slow/congested/closed，影响通行时间
+    """
+    __tablename__ = "road_segments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    origin = Column(String(3), nullable=False, index=True)  # depot code
+    destination = Column(String(3), nullable=False, index=True)
+    condition = Column(String(20), nullable=False, default="clear")  # 'clear', 'slow', 'congested', 'closed'
+    speed_factor = Column(Float, nullable=False, default=1.0)  # 通行速度系数
+    description = Column(Text, nullable=True)  # 路况说明 / 实时通报
+    updated_at = Column(DateTime, default=datetime.utcnow)

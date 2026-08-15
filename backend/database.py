@@ -22,7 +22,7 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
     """Enable WAL mode and a busy timeout so concurrent simulator threads don't collide."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=10000")
+    cursor.execute("PRAGMA busy_timeout=60000")
     cursor.close()
 
 

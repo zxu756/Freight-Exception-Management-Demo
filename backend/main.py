@@ -14,6 +14,9 @@ import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.m
 import notification_models  # noqa: F401  # Register customer notification table
 import sla_models  # noqa: F401  # Register SLA policy table
 import environment_models  # noqa: F401  # Register environmental event table
+import world.weather  # noqa: F401  # Register weather override table
+import world.shipments  # noqa: F401  # Register shipment link table
+import world.predict  # noqa: F401  # Register predicted impact table
 
 
 # Create database tables on startup
@@ -53,6 +56,55 @@ def _migrate_ml_fields():
             if "recommendation_reason" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN recommendation_reason TEXT"))
 
+    # impact_at column on environment_events (weather buffer period)
+    if "environment_events" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("environment_events")}
+        if "impact_at" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE environment_events ADD COLUMN impact_at DATETIME"))
+
+    # is_lcl column on sea_containers (LCL multi-consignment containers)
+    if "sea_containers" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("sea_containers")}
+        if "is_lcl" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE sea_containers ADD COLUMN is_lcl BOOLEAN DEFAULT 0"))
+
+    # cargo_line_id column on sea_exceptions (line-level exceptions)
+    if "sea_exceptions" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("sea_exceptions")}
+        if "cargo_line_id" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE sea_exceptions ADD COLUMN cargo_line_id INTEGER"))
+
+    # is_consolidated column on air_waybills (consolidated MAWB)
+    if "air_waybills" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("air_waybills")}
+        if "is_consolidated" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE air_waybills ADD COLUMN is_consolidated BOOLEAN DEFAULT 0"))
+
+    # hawb_id column on air_exceptions (house-level exceptions)
+    if "air_exceptions" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("air_exceptions")}
+        if "hawb_id" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE air_exceptions ADD COLUMN hawb_id INTEGER"))
+
+    # is_ltl column on road_consignments (LTL multi-consignment loads)
+    if "road_consignments" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("road_consignments")}
+        if "is_ltl" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE road_consignments ADD COLUMN is_ltl BOOLEAN DEFAULT 0"))
+
+    # consignment_line_id column on road_exceptions (line-level exceptions)
+    if "road_exceptions" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("road_exceptions")}
+        if "consignment_line_id" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE road_exceptions ADD COLUMN consignment_line_id INTEGER"))
+
     # SLA columns on cargo tables
     for table in ["air_waybills", "road_consignments", "sea_containers"]:
         if table not in insp.get_table_names():
@@ -89,35 +141,22 @@ async def lifespan(app: FastAPI):
         _db.close()
     print("Database initialized successfully")
 
-    # Start live air cargo simulator
-    if settings.air_sim_enabled:
-        from air_cargo_simulator import simulator
-        simulator.start()
-        print("Air cargo simulator started")
+    # Start the shared world clock (single time authority for all simulators)
+    from world.clock import world_clock
+    world_clock.start()
+    print("World clock started")
 
-    # Start live road freight simulator
-    if settings.road_sim_enabled:
-        from road_freight_simulator import simulator as road_simulator
-        road_simulator.start()
-        print("Road freight simulator started")
-
-    # Start live sea freight simulator
-    if settings.sea_sim_enabled:
-        from sea_freight_simulator import simulator as sea_simulator
-        sea_simulator.start()
-        print("Sea freight simulator started")
+    # Start the unified world coordinator (drives all three engines on one clock)
+    from world.coordinator import world_sim
+    world_sim.start()
+    print("World simulator coordinator started")
 
     yield
     # Shutdown
-    if settings.air_sim_enabled:
-        from air_cargo_simulator import simulator
-        simulator.stop()
-    if settings.road_sim_enabled:
-        from road_freight_simulator import simulator as road_simulator
-        road_simulator.stop()
-    if settings.sea_sim_enabled:
-        from sea_freight_simulator import simulator as sea_simulator
-        sea_simulator.stop()
+    from world.coordinator import world_sim
+    world_sim.stop()
+    from world.clock import world_clock
+    world_clock.stop()
     print("Shutting down...")
 
 
@@ -160,12 +199,13 @@ async def health_check():
 
 
 # Import and include routers
-from routers import air_cargo, road_freight, sea_freight, ask
+from routers import air_cargo, road_freight, sea_freight, ask, world
 
 app.include_router(air_cargo.router, prefix=settings.api_prefix, tags=["air_cargo"])
 app.include_router(road_freight.router, prefix=settings.api_prefix, tags=["road_freight"])
 app.include_router(sea_freight.router, prefix=settings.api_prefix, tags=["sea_freight"])
 app.include_router(ask.router, prefix=settings.api_prefix, tags=["ask"])
+app.include_router(world.router, prefix=settings.api_prefix, tags=["world"])
 
 
 if __name__ == "__main__":

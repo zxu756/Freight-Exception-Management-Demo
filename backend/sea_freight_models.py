@@ -88,6 +88,7 @@ class SeaContainer(Base):
     declared_value_nzd = Column(Float, nullable=False)
     service_level = Column(String(20), nullable=True)  # 'priority', 'standard', 'economy'
     sla_tier = Column(String(20), nullable=True)  # 'priority', 'standard', 'economy'
+    is_lcl = Column(Boolean, default=False)  # 拼箱：箱内多票货（各票独立货主/SLA）
 
     # Special handling
     temp_required_c = Column(Float, nullable=True)
@@ -118,6 +119,44 @@ class SeaContainer(Base):
     vessel = relationship("VesselVisit", back_populates="containers")
     events = relationship("SeaTrackingEvent", back_populates="container")
     exceptions = relationship("SeaException", back_populates="container")
+    cargo_lines = relationship("CargoLine", back_populates="container")
+
+
+class CargoLine(Base):
+    """
+    Cargo line - one consignment inside a container (LCL 拼箱内的单票货).
+
+    Each line has its own commodity, customer, value and SLA commitment, so a
+    single container can carry multiple consignments with different SLAs -
+    exceptions and breach judgement can be drilled down to line level.
+    """
+    __tablename__ = "cargo_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    container_number = Column(String(11), ForeignKey("sea_containers.container_number"), nullable=False, index=True)
+    line_number = Column(Integer, nullable=False)  # 1-based 箱内票号
+    commodity_code = Column(String(20), nullable=True)  # HS code
+    commodity_desc = Column(Text, nullable=False)
+    shipper_name = Column(String(200), nullable=True)
+    consignee_name = Column(String(200), nullable=True)
+    customer_name = Column(String(200), nullable=False)
+    customer_tier = Column(String(20), nullable=False)  # 'VIP', 'high', 'medium', 'low'
+    declared_value_nzd = Column(Float, nullable=False)
+    gross_weight_kg = Column(Float, nullable=False)
+    service_level = Column(String(20), nullable=True)  # 'priority', 'standard', 'economy'
+    sla_tier = Column(String(20), nullable=True)
+    temp_min_c = Column(Float, nullable=True)
+    temp_max_c = Column(Float, nullable=True)
+    scheduled_delivery = Column(DateTime, nullable=True)
+    sla_deadline = Column(DateTime, nullable=True)
+    sla_grace_deadline = Column(DateTime, nullable=True)  # 宽限截止
+    is_sla_breached = Column(Boolean, default=False)
+    breach_type = Column(String(20), nullable=True)  # 'excused' / 'unexcused'
+    sla_penalty_nzd = Column(Float, nullable=True)  # 违约金（NZD）
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    container = relationship("SeaContainer", back_populates="cargo_lines")
+    exceptions = relationship("SeaException", back_populates="cargo_line")
 
 
 class SeaTrackingEvent(Base):
@@ -154,6 +193,7 @@ class SeaException(Base):
     id = Column(Integer, primary_key=True, index=True)
     exception_id = Column(String(50), unique=True, nullable=False, index=True)
     container_number = Column(String(11), ForeignKey("sea_containers.container_number"), nullable=False, index=True)
+    cargo_line_id = Column(Integer, ForeignKey("cargo_lines.id"), nullable=True, index=True)  # 票级异常归属
     exception_type = Column(String(50), nullable=False)
     # 'vessel_delay', 'customs_hold', 'biosecurity_hold', 'port_congestion',
     # 'temp_excursion', 'damage', 'misroute', 'dg_incident'
@@ -189,3 +229,4 @@ class SeaException(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     container = relationship("SeaContainer", back_populates="exceptions")
+    cargo_line = relationship("CargoLine")

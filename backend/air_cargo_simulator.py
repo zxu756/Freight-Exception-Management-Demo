@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 
 from database import SessionLocal, WRITE_LOCK
 from air_cargo_models import (
-    Airport, AirFlight, AirWaybill, AirTrackingEvent, AirCustomsInspection, AirException
+    Airport, AirFlight, AirWaybill, AirTrackingEvent, AirCustomsInspection, AirException, HouseWaybill
 )
 from air_cargo_seed import generate_airports, flight_duration as _base_flight_duration
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
@@ -33,6 +33,8 @@ from sla_models import get_policy, determine_breach, estimate_penalty, map_servi
 from environment_events import generate_event, get_active_events_for_route
 from environment_models import EVENT_TYPE_TO_REASON, SEVERITY_DELAY_MINUTES
 from anomaly_detector import detector
+from world.clock import world_clock
+from world.shipments import NZ_AIRPORT_CODES
 
 # ============================================================
 # 航班时刻表 (daily frequencies, one-way)
@@ -284,13 +286,12 @@ class AirCargoSimulator:
 
     def __init__(self, speed=None):
         self.sim_now = datetime.utcnow().replace(microsecond=0)
-        self.speed = speed if speed is not None else settings.air_sim_speed
-        self.paused = False
+        if speed is not None:
+            world_clock.set_speed(speed)
         self.running = False
         self.started_at = None
         self._stop_event = threading.Event()
         self._thread = None
-        self._last_real = time.monotonic()
         self._route_next_dep = {}
         self._pending = []
         self._pending_seq = 0
@@ -321,34 +322,30 @@ class AirCargoSimulator:
                     self._backfill()
             finally:
                 db.close()
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="air-cargo-sim")
-        self._thread.start()
-        print(f"[air-sim] started speed={self.speed}x sim_now={self.sim_now.isoformat()}")
+        print(f"[air-sim] ready speed={self.speed}x sim_now={self.sim_now.isoformat()}")
 
     def stop(self):
         self.running = False
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
         print("[air-sim] stopped")
 
     def set_speed(self, speed):
-        self.speed = max(0.0, min(float(speed), 3600.0))
+        world_clock.set_speed(speed)
 
-    def _run(self):
-        while not self._stop_event.is_set():
-            t0 = time.monotonic()
-            if not self.paused:
-                now_real = time.monotonic()
-                elapsed = now_real - self._last_real
-                self._last_real = now_real
-                self.sim_now += timedelta(seconds=elapsed * self.speed)
-                try:
-                    self.tick()
-                except Exception as e:
-                    print(f"[air-sim] tick error: {e}")
-            time.sleep(max(0.1, settings.air_sim_tick_seconds - (time.monotonic() - t0)))
+    @property
+    def speed(self):
+        """Global world speed (single clock shared by all modes)."""
+        return world_clock.speed
+
+    @property
+    def paused(self):
+        """Global world pause state (single clock shared by all modes)."""
+        return world_clock.paused
+
+    @paused.setter
+    def paused(self, value):
+        world_clock.paused = value
+
+
 
     # ----------------------------------------------------------
     # 初始化
@@ -497,7 +494,7 @@ class AirCargoSimulator:
                 self._derive_flight_statuses(db)
                 if (self.sim_now - self._last_env_event_sim) > timedelta(hours=2):
                     self._generate_env_events(db)
-                    self._cleanup_env_events()
+                    self._cleanup_env_events(db)
                     self._last_env_event_sim = self.sim_now
                 if (self.sim_now - self._last_cleanup_sim) > timedelta(hours=1):
                     self._cleanup(db)
@@ -506,23 +503,38 @@ class AirCargoSimulator:
                 db.close()
 
     def _generate_env_events(self, db):
+        # 世界天气驱动的环境事件（天气 → 延误 因果链）
+        from world.causality import weather_events_for_mode
+        for loc, event in weather_events_for_mode(db, "air", self.sim_now, self._active_events):
+            db.add(event)
+            self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at, "impact_at": event.impact_at})
+        # 少量随机非天气事件（事故/机械等）保持真实感
         from environment_events import AIR_LOCATIONS
-        for _ in range(random.randint(1, 2)):
+        if random.random() < 0.25:
             loc = random.choice(AIR_LOCATIONS)
             event = generate_event(db, "air", loc, self.sim_now)
             if event:
                 self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at})
         db.commit()
 
-    def _cleanup_env_events(self):
+    def _cleanup_env_events(self, db):
         now = self.sim_now
         for loc in list(self._active_events.keys()):
             self._active_events[loc] = [e for e in self._active_events[loc] if e["ends_at"] >= now]
             if not self._active_events[loc]:
                 del self._active_events[loc]
+        # purge expired events from the DB so it doesn't grow unbounded
+        from environment_models import EnvironmentEvent
+        db.query(EnvironmentEvent).filter(
+            EnvironmentEvent.mode == "air", EnvironmentEvent.ends_at < now).delete()
 
     def _route_active_events(self, org, dst):
-        return self._active_events.get(org, []) + self._active_events.get(dst, [])
+        now = self.sim_now
+
+        def _impacting(loc):
+            return [e for e in self._active_events.get(loc, [])
+                    if e.get("impact_at", now) <= now <= e["ends_at"]]
+        return _impacting(org) + _impacting(dst)
 
     def _spawn_due_flights(self):
         routes = DOMESTIC_ROUTES + INTL_ROUTES
@@ -645,20 +657,43 @@ class AirCargoSimulator:
             pool = EXPORT_COMMODITIES if exporting else IMPORT_COMMODITIES
             route_type = "international"
 
-        desc, hs, value_range, tiers, shc, temp = random.choice(pool)
-        value = random.randint(*value_range)
+        # 集运（consolidation）：~40% 的国际运单装多票分运单（HAWB），各票独立货主/货值/SLA
+        is_consolidated = (not is_domestic) and random.random() < 0.4
+        n_hawb = random.randint(2, 6) if is_consolidated else 1
+
+        # 逐票（HAWB）生成货物数据
+        hawb_meta = []
+        for _ in range(n_hawb):
+            _desc, _hs, _vr, _tiers, _shc, _temp = random.choice(pool)
+            _customer, _tier = random.choice(CUSTOMERS)
+            if random.random() < 0.1:
+                _tier = "VIP"
+            elif _tier == "VIP" and random.random() < 0.7:
+                _tier = "high"
+            _svc = random.choices(["priority", "standard", "economy"], weights=[0.2, 0.6, 0.2])[0]
+            _sla_h = {"domestic": random.choice([10, 24]), "international": random.choice([36, 48, 60, 72])}[route_type]
+            if _svc == "priority":
+                _sla_h = max(8, _sla_h // 2)
+            hawb_meta.append({
+                "desc": _desc, "hs": _hs, "value": random.randint(*_vr),
+                "shc": _shc, "temp": _temp, "customer": _customer,
+                "tier": _tier, "svc": _svc, "sla_h": _sla_h,
+            })
+
+        # 主票 = 最高货值 HAWB（主运单字段镜像它，保持向后兼容）
+        main = max(hawb_meta, key=lambda d: d["value"])
+        desc, hs, value = main["desc"], main["hs"], main["value"]
+        shc, temp = main["shc"], main["temp"]
+        customer, tier = main["customer"], main["tier"]
+        service = main["svc"]
+        sla_h = main["sla_h"]
+        policy = get_policy("air", service)
+
         pieces = random.randint(2, 25)
         weight = round(pieces * random.uniform(40, 120), 1)
         volume = round(weight / 160.0, 2)
         chargeable = max(weight, round(volume * 167, 1))
 
-        customer, tier = random.choice(CUSTOMERS)
-        if random.random() < 0.1:
-            tier = "VIP"
-        elif tier == "VIP" and random.random() < 0.7:
-            tier = "high"
-
-        service = random.choices(["priority", "standard", "economy"], weights=[0.2, 0.6, 0.2])[0]
         priority = "normal"
         if "urgent" in desc or "AOG" in desc or random.random() < 0.08:
             priority = "critical"
@@ -667,11 +702,6 @@ class AirCargoSimulator:
         if priority == "critical":
             service = "priority"
 
-        sla_h = {"domestic": random.choice([10, 24]), "international": random.choice([36, 48, 60, 72])}[route_type]
-        if service == "priority":
-            sla_h = max(8, sla_h // 2)
-        policy = get_policy("air", service)
-
         temp_min, temp_max = None, None
         if temp:
             temp_min, temp_max = temp
@@ -679,7 +709,7 @@ class AirCargoSimulator:
         awb_number = f"086-{self._awb_counter:08d}"
         self._awb_counter += 1
         hawb = None
-        if "consolidated" in desc and random.random() < 0.7:
+        if is_consolidated:
             hawb = f"086-{self._awb_counter:08d}"
             self._awb_counter += 1
 
@@ -687,6 +717,7 @@ class AirCargoSimulator:
         eff_arr = arr + timedelta(minutes=delay_minutes)
         waybill = AirWaybill(
             awb_number=awb_number, hawb_number=hawb, route_type=route_type,
+            is_consolidated=is_consolidated,
             origin_airport=org, destination_airport=dst,
             transit_points=json.dumps([]),
             flight_number=flight.flight_number,
@@ -713,6 +744,29 @@ class AirCargoSimulator:
         db.add(waybill)
         db.flush()
         self.waybills_generated += 1
+
+        # 分运单（HAWB）：集运主运单内每票货，独立货主/货值/SLA
+        delivery_buffer = 3.0 if is_domestic else 6.0
+        eff_arr = arr + timedelta(minutes=delay_minutes)
+        for i, hm in enumerate(hawb_meta):
+            _hp = get_policy("air", hm["svc"])
+            _hdeadline = dep + timedelta(hours=hm["sla_h"])
+            _htmin, _htmax = (hm["temp"][0], hm["temp"][1]) if hm["temp"] else (None, None)
+            db.add(HouseWaybill(
+                awb_number=awb_number,
+                hawb_number=f"{awb_number}-{i + 1:02d}",
+                commodity_code=hm["hs"], commodity_desc=hm["desc"],
+                shipper_name=hm["customer"], consignee_name=f"{hm['customer']} DC",
+                customer_name=hm["customer"], customer_tier=hm["tier"],
+                declared_value_nzd=float(hm["value"]),
+                pieces=max(1, pieces // n_hawb),
+                gross_weight_kg=round(weight / n_hawb, 1),
+                service_level=hm["svc"], sla_tier=map_service_level_to_tier(hm["svc"]),
+                temp_min_c=_htmin, temp_max_c=_htmax,
+                scheduled_delivery=eff_arr + timedelta(hours=delivery_buffer),
+                sla_deadline=_hdeadline,
+                sla_grace_deadline=_hdeadline + timedelta(hours=_hp["grace_hours"]),
+            ))
 
         self._schedule_waybill_events(waybill, flight, dep, arr, delay_minutes, is_domestic)
 
@@ -837,6 +891,12 @@ class AirCargoSimulator:
             w.current_location = flight.destination_airport
             self._insert_event(db, w.awb_number, "ARR", "Flight arrived",
                                flight.destination_airport, ts=eff_arr)
+            # 多式联运：国际进口运单落地 → 生成陆运集疏运腿
+            if w.route_type == "international" and w.destination_airport in NZ_AIRPORT_CODES:
+                from world.shipments import create_road_drayage
+                create_road_drayage(db, "air", w.awb_number, w.destination_airport,
+                                    w.commodity_desc, w.customer_name, w.customer_tier,
+                                    w.declared_value_nzd, w.gross_weight_kg, eff_arr)
             if w.route_type == "international" and random.random() < 0.004:
                 self._create_exception(db, w, "misroute",
                                        f"Cargo offloaded at incorrect destination during {flight.flight_number} arrival",
@@ -1006,12 +1066,44 @@ class AirCargoSimulator:
             w.breach_type = breach_type
             w.sla_penalty_nzd = penalty
 
-    def _create_exception(self, db, waybill, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
+        # HAWB 级 SLA 判定：集运主运单内每票分运单独立判罚
+        for hw in db.query(HouseWaybill).filter(HouseWaybill.awb_number == awb).all():
+            _hp = get_policy("air", hw.service_level or "standard")
+            _b, _bt, _pen = evaluate_breach(
+                w.delivered_at, hw.sla_deadline, _hp["grace_hours"], _hp["penalty_pct"],
+                hw.declared_value_nzd, excused)
+            if _b or _bt:
+                hw.is_sla_breached = _b
+                hw.breach_type = _bt
+                hw.sla_penalty_nzd = _pen
+            # 票级异常：该分运单正式违约时，生成只针对该票的异常并通知该票货主
+            if _b:
+                late_hours = max(0.0, (w.delivered_at - hw.sla_deadline).total_seconds() / 3600)
+                self._create_exception(
+                    db, w, "sla_breach",
+                    f"{hw.hawb_number} {hw.commodity_desc} SLA 违约（晚于截止 {hw.sla_deadline.strftime('%m-%d %H:%M')}）",
+                    late_hours,
+                    f"House waybill {hw.hawb_number} ({hw.commodity_desc}, {hw.customer_name}) "
+                    f"exceeded its SLA commitment. Estimated penalty {_pen or 0:.0f} NZD.",
+                    ["waive", "compensate"],
+                    hawb=hw,
+                )
+
+    def _create_exception(self, db, waybill, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None, hawb=None):
+        # 票级（HAWB）异常时用分运单的货物字段，通知只发给该票货主
+        _value = hawb.declared_value_nzd if hawb else waybill.declared_value_nzd
+        _tier = hawb.customer_tier if hawb else waybill.customer_tier
+        _hs = hawb.commodity_code if hawb else waybill.commodity_code
+        _temp_required = (hawb.temp_min_c is not None) if hawb else (waybill.temp_min_c is not None)
+        _sla_dl = hawb.sla_deadline if hawb else waybill.sla_deadline
+        _customer = hawb.customer_name if hawb else waybill.customer_name
+        _ref = waybill.awb_number + (f"/{hawb.hawb_number}" if hawb else "")
+
         eff_delivery = waybill.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
-        sla_breach = (eff_delivery - waybill.sla_deadline).total_seconds() / 3600
+        sla_breach = (eff_delivery - _sla_dl).total_seconds() / 3600 if _sla_dl else delay_hours
         score = calculate_risk_score(
-            cargo_value=waybill.declared_value_nzd,
-            customer_tier=waybill.customer_tier,
+            cargo_value=_value,
+            customer_tier=_tier,
             sla_breach_hours=sla_breach,
             exception_type="customs_hold" if exc_type == "customs_hold" else exc_type
         )
@@ -1019,14 +1111,14 @@ class AirCargoSimulator:
         severity = calculate_severity(
             score, sla_breach, exc_type,
             is_dg=waybill.dg_class is not None,
-            temp_required=waybill.temp_min_c is not None,
-            perishable=(waybill.commodity_code or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
+            temp_required=_temp_required,
+            perishable=(_hs or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
         )
         cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
-        cost = estimate_recovery_cost(exc_type, waybill.declared_value_nzd)
-        best_action, action_reason = select_best_recovery(category, waybill.declared_value_nzd, waybill.customer_tier)
+        cost = estimate_recovery_cost(exc_type, _value)
+        best_action, action_reason = select_best_recovery(category, _value, _tier)
         if cls["is_ood"] and settings.llm_enabled:
             diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
@@ -1038,6 +1130,7 @@ class AirCargoSimulator:
         exc = AirException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             awb_number=waybill.awb_number,
+            hawb_id=hawb.id if hawb else None,
             exception_type=exc_type,
             severity=severity,
             risk_level=risk_level,
@@ -1068,7 +1161,7 @@ class AirCargoSimulator:
         self.exceptions_generated += 1
         db.add(exc)
         db.flush()
-        self._notify(db, exc, waybill.customer_name, waybill.awb_number,
+        self._notify(db, exc, _customer, _ref,
                      category, root_cause, recovery, cls["classification_confidence"],
                      waybill.estimated_delivery)
 

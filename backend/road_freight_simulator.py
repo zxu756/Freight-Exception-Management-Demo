@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 
 from database import SessionLocal, WRITE_LOCK
 from road_freight_models import (
-    Depot, RoadTrip, RoadConsignment, RoadTrackingEvent, RoadException
+    Depot, RoadTrip, RoadConsignment, RoadTrackingEvent, RoadException, ConsignmentLine
 )
 from road_freight_seed import (
     generate_depots, road_distance, trip_duration_hours, FERRY_CROSSING_HOURS, NZ_DEPOTS,
@@ -38,6 +38,7 @@ from sla_models import get_policy, determine_breach, estimate_penalty, map_servi
 from environment_events import generate_event, get_active_events_for_route
 from environment_models import EVENT_TYPE_TO_REASON, SEVERITY_DELAY_MINUTES
 from anomaly_detector import detector
+from world.clock import world_clock
 
 # ============================================================
 # 分拨中心岛别映射
@@ -155,24 +156,36 @@ def get_delay_reasons(org, dst):
     return ROUTE_DELAY_PROFILES.get((org, dst), DELAY_REASONS)
 
 
+# 路况等级 → 通行时间系数（1.0 正常；closed 绕行 3 倍）
+CONDITION_TIME_FACTOR = {"clear": 1.0, "slow": 1.3, "congested": 1.8, "closed": 3.0}
+CONDITION_SPEED_FACTOR = {"clear": 1.0, "slow": 0.7, "congested": 0.4, "closed": 0.0}
+EVENT_TO_CONDITION = {"weather": "slow", "road_closure": "closed", "accident": "congested"}
+CONDITION_DESCRIPTION = {
+    "clear": "道路畅通",
+    "slow": "天气影响，通行缓慢",
+    "congested": "交通事故，交通拥堵",
+    "closed": "道路封闭，需绕行",
+}
+
+
 class RoadFreightSimulator:
     """Live road freight operations simulator running as a background thread."""
 
     def __init__(self, speed=None):
         self.sim_now = datetime.utcnow().replace(microsecond=0)
-        self.speed = speed if speed is not None else settings.road_sim_speed
-        self.paused = False
+        if speed is not None:
+            world_clock.set_speed(speed)
         self.running = False
         self.started_at = None
         self._stop_event = threading.Event()
         self._thread = None
-        self._last_real = time.monotonic()
         self._route_next_dep = {}
         self._pending = []
         self._pending_seq = 0
         self._last_cleanup_sim = self.sim_now
         self._last_env_event_sim = self.sim_now
         self._active_events = {}  # location -> [EnvironmentEvent]（内存缓存）
+        self._road_conditions = {}  # (org, dst) -> {"condition", "description"}
         self.trips_generated = 0
         self.consignments_generated = 0
         self.exceptions_generated = 0
@@ -197,34 +210,30 @@ class RoadFreightSimulator:
                     self._backfill()
             finally:
                 db.close()
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="road-freight-sim")
-        self._thread.start()
-        print(f"[road-sim] started speed={self.speed}x sim_now={self.sim_now.isoformat()}")
+        print(f"[road-sim] ready speed={self.speed}x sim_now={self.sim_now.isoformat()}")
 
     def stop(self):
         self.running = False
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
         print("[road-sim] stopped")
 
     def set_speed(self, speed):
-        self.speed = max(0.0, min(float(speed), 3600.0))
+        world_clock.set_speed(speed)
 
-    def _run(self):
-        while not self._stop_event.is_set():
-            t0 = time.monotonic()
-            if not self.paused:
-                now_real = time.monotonic()
-                elapsed = now_real - self._last_real
-                self._last_real = now_real
-                self.sim_now += timedelta(seconds=elapsed * self.speed)
-                try:
-                    self.tick()
-                except Exception as e:
-                    print(f"[road-sim] tick error: {e}")
-            time.sleep(max(0.1, settings.road_sim_tick_seconds - (time.monotonic() - t0)))
+    @property
+    def speed(self):
+        """Global world speed (single clock shared by all modes)."""
+        return world_clock.speed
+
+    @property
+    def paused(self):
+        """Global world pause state (single clock shared by all modes)."""
+        return world_clock.paused
+
+    @paused.setter
+    def paused(self, value):
+        world_clock.paused = value
+
+
 
     # ----------------------------------------------------------
     # 初始化
@@ -339,7 +348,8 @@ class RoadFreightSimulator:
                 self._derive_trip_statuses(db)
                 if (self.sim_now - self._last_env_event_sim) > timedelta(hours=2):
                     self._generate_env_events(db)
-                    self._cleanup_env_events()
+                    self._cleanup_env_events(db)
+                    self._update_road_conditions(db)
                     self._last_env_event_sim = self.sim_now
                 if (self.sim_now - self._last_cleanup_sim) > timedelta(hours=1):
                     self._cleanup(db)
@@ -348,26 +358,73 @@ class RoadFreightSimulator:
                 db.close()
 
     def _generate_env_events(self, db):
-        """持续生成环境事件（暴雨/封路/事故）"""
+        # 世界天气驱动的环境事件（天气 → 延误 因果链）
+        from world.causality import weather_events_for_mode
+        for loc, event in weather_events_for_mode(db, "road", self.sim_now, self._active_events):
+            db.add(event)
+            self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at, "impact_at": event.impact_at})
+        # 少量随机非天气事件（事故/机械等）保持真实感
         from environment_events import ROAD_LOCATIONS
-        for _ in range(random.randint(1, 2)):
+        if random.random() < 0.25:
             loc = random.choice(ROAD_LOCATIONS)
             event = generate_event(db, "road", loc, self.sim_now)
             if event:
                 self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at})
         db.commit()
 
-    def _cleanup_env_events(self):
-        """清理过期的环境事件"""
+    def _cleanup_env_events(self, db):
+        """清理过期的环境事件（内存 + DB）"""
         now = self.sim_now
         for loc in list(self._active_events.keys()):
             self._active_events[loc] = [e for e in self._active_events[loc] if e["ends_at"] >= now]
             if not self._active_events[loc]:
                 del self._active_events[loc]
+        from environment_models import EnvironmentEvent
+        db.query(EnvironmentEvent).filter(
+            EnvironmentEvent.mode == "road", EnvironmentEvent.ends_at < now).delete()
 
     def _route_active_events(self, org, dst):
-        """查路线起终点是否有活跃环境事件"""
-        return self._active_events.get(org, []) + self._active_events.get(dst, [])
+        """查路线起终点是否有已过缓冲期、正在实际影响的事件"""
+        now = self.sim_now
+
+        def _impacting(loc):
+            return [e for e in self._active_events.get(loc, [])
+                    if e.get("impact_at", now) <= now <= e["ends_at"]]
+        return _impacting(org) + _impacting(dst)
+
+    def _update_road_conditions(self, db):
+        """根据活跃环境事件更新各路段路况（内存 + DB）"""
+        from road_freight_models import RoadSegment
+        self._road_conditions = {}
+        for org, dst, freq, carrier, vt in ROAD_ROUTES:
+            events = self._route_active_events(org, dst)
+            condition = "clear"
+            for e in events:
+                cond = EVENT_TO_CONDITION.get(e["event_type"])
+                if cond and CONDITION_SPEED_FACTOR.get(cond, 1.0) < CONDITION_SPEED_FACTOR.get(condition, 1.0):
+                    condition = cond
+            self._road_conditions[(org, dst)] = {
+                "condition": condition,
+                "description": CONDITION_DESCRIPTION.get(condition, "道路畅通"),
+            }
+            # 同步 DB
+            seg = db.query(RoadSegment).filter(
+                RoadSegment.origin == org, RoadSegment.destination == dst).first()
+            if not seg:
+                seg = RoadSegment(origin=org, destination=dst)
+                db.add(seg)
+            seg.condition = condition
+            seg.speed_factor = CONDITION_SPEED_FACTOR.get(condition, 1.0)
+            seg.description = CONDITION_DESCRIPTION.get(condition, "道路畅通")
+            seg.updated_at = self.sim_now
+        db.commit()
+
+    def _get_road_condition(self, org, dst):
+        """查路段路况，返回 (condition, description)"""
+        c = self._road_conditions.get((org, dst))
+        if c:
+            return c["condition"], c["description"]
+        return "clear", "道路畅通"
 
     def _spawn_due_trips(self):
         for org, dst, freq, carrier, vt in ROAD_ROUTES:
@@ -404,6 +461,9 @@ class RoadFreightSimulator:
         dep = dep or self._route_next_dep.get((org, dst, carrier), self.sim_now)
         is_inter_island = ISLAND_MAP[org] != ISLAND_MAP[dst]
         dur = trip_duration_hours(org, dst, is_inter_island)
+        # 路况影响通行时间：缓行/拥堵/封闭 → 时间放大
+        condition, _desc = self._get_road_condition(org, dst)
+        dur = dur * CONDITION_TIME_FACTOR.get(condition, 1.0)
         arr = dep + timedelta(hours=dur)
 
         delay_minutes = 0
@@ -493,19 +553,44 @@ class RoadFreightSimulator:
             pool = DOMESTIC_COMMODITIES if random.random() < 0.7 else EXPORT_COMMODITIES
             route_type = "line_haul" if road_distance(org, dst) > 250 else "regional"
 
-        desc, hs, value_range, tiers, vt, temp = random.choice(pool)
-        value = random.randint(*value_range)
+        dur_hours = trip_duration_hours(org, dst, is_inter_island)
+
+        # 拼装（LTL）：~40% 的托运单装多票货，每票独立货主/货值/SLA
+        is_ltl = random.random() < 0.4
+        n_lines = random.randint(2, 5) if is_ltl else 1
+
+        # 逐票生成货物数据
+        lines_meta = []
+        for _ in range(n_lines):
+            _desc, _hs, _vr, _tiers, _vt, _temp = random.choice(pool)
+            _customer, _tier = random.choice(CUSTOMERS)
+            if random.random() < 0.08:
+                _tier = "VIP"
+            elif _tier == "VIP" and random.random() < 0.7:
+                _tier = "high"
+            _svc = random.choices(["priority", "standard", "economy"], weights=[0.18, 0.62, 0.2])[0]
+            _sla_h = max(6.0, round(dur_hours * random.choice([0.9, 1.1, 1.3, 1.5]), 1))
+            if _svc == "priority":
+                _sla_h = max(4.0, _sla_h * 0.6)
+            lines_meta.append({
+                "desc": _desc, "hs": _hs, "value": random.randint(*_vr),
+                "vt": _vt, "temp": _temp, "customer": _customer,
+                "tier": _tier, "svc": _svc, "sla_h": _sla_h,
+            })
+
+        # 主票 = 最高货值票（托运单字段镜像它，保持向后兼容）
+        main = max(lines_meta, key=lambda d: d["value"])
+        desc, hs, value = main["desc"], main["hs"], main["value"]
+        vt, temp = main["vt"], main["temp"]
+        customer, tier = main["customer"], main["tier"]
+        service = main["svc"]
+        sla_h = main["sla_h"]
+        policy = get_policy("road", service)
+
         pieces = random.randint(2, 40)
         weight = round(pieces * random.uniform(50, 400), 1)
         volume = round(weight / 160.0, 2)
 
-        customer, tier = random.choice(CUSTOMERS)
-        if random.random() < 0.08:
-            tier = "VIP"
-        elif tier == "VIP" and random.random() < 0.7:
-            tier = "high"
-
-        service = random.choices(["priority", "standard", "economy"], weights=[0.18, 0.62, 0.2])[0]
         priority = "normal"
         if "urgent" in desc or random.random() < 0.06:
             priority = "critical"
@@ -513,12 +598,6 @@ class RoadFreightSimulator:
             priority = "high"
         if priority == "critical":
             service = "priority"
-
-        dur_hours = trip_duration_hours(org, dst, is_inter_island)
-        sla_h = max(6.0, round(dur_hours * random.choice([0.9, 1.1, 1.3, 1.5]), 1))
-        if service == "priority":
-            sla_h = max(4.0, sla_h * 0.6)
-        policy = get_policy("road", service)
 
         temp_min, temp_max = None, None
         if temp:
@@ -538,6 +617,7 @@ class RoadFreightSimulator:
             customer_name=customer, customer_tier=tier,
             declared_value_nzd=float(value), service_level=service,
             priority=priority,
+            is_ltl=is_ltl,
             sla_tier=map_service_level_to_tier(service),
             temp_required_c=temp_min if (vt == "refrigerated" and temp_min is not None) else None,
             temp_min_c=temp_min, temp_max_c=temp_max,
@@ -552,6 +632,26 @@ class RoadFreightSimulator:
         db.add(cons)
         db.flush()
         self.consignments_generated += 1
+
+        # 票级货物行（LTL 多票 / FTL 单票），每票独立货主/货值/SLA
+        for i, lm in enumerate(lines_meta):
+            _lp = get_policy("road", lm["svc"])
+            _ldl = dep + timedelta(hours=lm["sla_h"])
+            _ltmin, _ltmax = (lm["temp"][0], lm["temp"][1]) if lm["temp"] else (None, None)
+            db.add(ConsignmentLine(
+                consignment_number=cn, line_number=i + 1,
+                commodity_code=lm["hs"], commodity_desc=lm["desc"],
+                shipper_name=lm["customer"], consignee_name=f"{lm['customer']} DC",
+                customer_name=lm["customer"], customer_tier=lm["tier"],
+                declared_value_nzd=float(lm["value"]),
+                pieces=max(1, pieces // n_lines),
+                gross_weight_kg=round(weight / n_lines, 1),
+                service_level=lm["svc"], sla_tier=map_service_level_to_tier(lm["svc"]),
+                temp_min_c=_ltmin, temp_max_c=_ltmax,
+                scheduled_delivery=eff_arr + timedelta(hours=delivery_buffer),
+                sla_deadline=_ldl,
+                sla_grace_deadline=_ldl + timedelta(hours=_lp["grace_hours"]),
+            ))
 
         self._schedule_consignment_events(cons, trip, dep, arr, delay_minutes)
 
@@ -610,6 +710,15 @@ class RoadFreightSimulator:
     def _on_event(self, db, payload):
         cn, code, desc, loc, reason, message, ts = payload
         self._insert_event(db, cn, code, desc, loc, reason, message, ts=ts)
+        # 重建路径（_rebuild_pending_from_db）用通用 event 链恢复里程碑：
+        # POD 必须驱动交付状态机与 SLA/票级判定，否则重启后货物卡在未交付
+        if code == "POD":
+            c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
+            if c and c.current_status != "POD":
+                c.current_status = "POD"
+                c.current_location = c.destination_depot
+                c.delivered_at = ts or self.sim_now
+                self._finalize_pod(db, c)
 
     def _insert_event(self, db, cn, code, desc, loc, reason=None, message=None, ts=None):
         event = RoadTrackingEvent(
@@ -789,6 +898,11 @@ class RoadFreightSimulator:
         c.current_location = c.destination_depot
         c.delivered_at = self.sim_now
         self._insert_event(db, cn, "POD", "Proof of delivery signed", c.destination_depot)
+        self._finalize_pod(db, c)
+
+    def _finalize_pod(self, db, c):
+        """交付收尾：箱级 SLA 判定 + 票级独立判罚（_on_pod 与重建路径共用）。"""
+        cn = c.consignment_number
         # SLA 违约判定
         policy = get_policy("road", c.service_level or "standard")
         excused = False
@@ -804,14 +918,45 @@ class RoadFreightSimulator:
             c.breach_type = breach_type
             c.sla_penalty_nzd = penalty
 
-    def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
+        # 票级 SLA 判定：LTL 托运单内每票货独立判罚
+        for line in db.query(ConsignmentLine).filter(ConsignmentLine.consignment_number == cn).all():
+            _lp = get_policy("road", line.service_level or "standard")
+            _b, _bt, _pen = evaluate_breach(
+                c.delivered_at, line.sla_deadline, _lp["grace_hours"], _lp["penalty_pct"],
+                line.declared_value_nzd, excused)
+            if _b or _bt:
+                line.is_sla_breached = _b
+                line.breach_type = _bt
+                line.sla_penalty_nzd = _pen
+            # 票级异常：该票正式违约时，生成只针对该票的异常并通知该票货主
+            if _b:
+                late_hours = max(0.0, (c.delivered_at - line.sla_deadline).total_seconds() / 3600)
+                self._create_exception(
+                    db, c, "sla_breach",
+                    f"票{line.line_number} {line.commodity_desc} SLA 违约（晚于截止 {line.sla_deadline.strftime('%m-%d %H:%M')}）",
+                    late_hours,
+                    f"Consignment line {line.line_number} ({line.commodity_desc}, {line.customer_name}) "
+                    f"exceeded its SLA commitment. Estimated penalty {_pen or 0:.0f} NZD.",
+                    ["waive", "compensate"],
+                    consignment_line=line,
+                )
+
+    def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None, consignment_line=None):
+        # 票级异常时用票的货物字段（货主/货值/温度/SLA/HS），通知也只发给该票货主
+        _value = consignment_line.declared_value_nzd if consignment_line else consignment.declared_value_nzd
+        _tier = consignment_line.customer_tier if consignment_line else consignment.customer_tier
+        _hs = consignment_line.commodity_code if consignment_line else consignment.commodity_code
+        _temp_required = (consignment_line.temp_min_c is not None) if consignment_line else (consignment.temp_min_c is not None)
+        _sla_dl = consignment_line.sla_deadline if consignment_line else consignment.sla_deadline
+        _customer = consignment_line.customer_name if consignment_line else consignment.customer_name
+        _ref = consignment.consignment_number + (f"/票{consignment_line.line_number}" if consignment_line else "")
         eff_delivery = consignment.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
-        sla_breach = (eff_delivery - consignment.sla_deadline).total_seconds() / 3600
+        sla_breach = (eff_delivery - _sla_dl).total_seconds() / 3600 if _sla_dl else delay_hours
         mapped = "delay" if exc_type in ("ferry_delay", "delay", "road_closure", "breakdown",
                                          "driver_hours", "accident") else exc_type
         score = calculate_risk_score(
-            cargo_value=consignment.declared_value_nzd,
-            customer_tier=consignment.customer_tier,
+            cargo_value=_value,
+            customer_tier=_tier,
             sla_breach_hours=sla_breach,
             exception_type=mapped
         )
@@ -819,14 +964,14 @@ class RoadFreightSimulator:
         severity = calculate_severity(
             score, sla_breach, exc_type,
             is_dg=consignment.dg_class is not None,
-            temp_required=consignment.temp_min_c is not None,
-            perishable=(consignment.commodity_code or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
+            temp_required=_temp_required,
+            perishable=(_hs or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
         )
         cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
-        cost = estimate_recovery_cost(exc_type, consignment.declared_value_nzd)
-        best_action, action_reason = select_best_recovery(category, consignment.declared_value_nzd, consignment.customer_tier)
+        cost = estimate_recovery_cost(exc_type, _value)
+        best_action, action_reason = select_best_recovery(category, _value, _tier)
         if cls["is_ood"] and settings.llm_enabled:
             diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
@@ -838,6 +983,7 @@ class RoadFreightSimulator:
         exc = RoadException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             consignment_number=consignment.consignment_number,
+            consignment_line_id=consignment_line.id if consignment_line else None,
             exception_type=exc_type,
             severity=severity,
             risk_level=risk_level,
@@ -868,7 +1014,7 @@ class RoadFreightSimulator:
         self.exceptions_generated += 1
         db.add(exc)
         db.flush()
-        self._notify(db, exc, consignment.customer_name, consignment.consignment_number,
+        self._notify(db, exc, _customer, _ref,
                      category, root_cause, recovery, cls["classification_confidence"],
                      consignment.estimated_delivery)
 

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 
 from database import SessionLocal, WRITE_LOCK
 from sea_freight_models import (
-    SeaPort, VesselVisit, SeaContainer, SeaTrackingEvent, SeaException
+    SeaPort, VesselVisit, SeaContainer, SeaTrackingEvent, SeaException, CargoLine
 )
 from sea_freight_seed import (
     generate_ports, EXPORT_COMMODITIES, IMPORT_COMMODITIES, CUSTOMERS
@@ -37,6 +37,7 @@ from sla_models import get_policy, determine_breach, estimate_penalty, map_servi
 from environment_events import generate_event, get_active_events_for_route
 from environment_models import EVENT_TYPE_TO_REASON, SEVERITY_DELAY_MINUTES
 from anomaly_detector import detector
+from world.clock import world_clock
 
 # 活跃窗口：为 arrival 落在该窗口内的船生成集装箱
 ACTIVE_WINDOW_BEFORE_HOURS = 120   # 5 days before
@@ -72,13 +73,12 @@ class SeaFreightSimulator:
 
     def __init__(self, speed=None):
         self.sim_now = datetime.utcnow().replace(microsecond=0)
-        self.speed = speed if speed is not None else settings.sea_sim_speed
-        self.paused = False
+        if speed is not None:
+            world_clock.set_speed(speed)
         self.running = False
         self.started_at = None
         self._stop_event = threading.Event()
         self._thread = None
-        self._last_real = time.monotonic()
         self._pending = []
         self._pending_seq = 0
         self._last_cleanup_sim = self.sim_now
@@ -108,36 +108,62 @@ class SeaFreightSimulator:
                 self._load_vessel_visits(db)
                 if backfill:
                     self._backfill(db)
+                self._backfill_cargo_lines(db)
             finally:
                 db.close()
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="sea-freight-sim")
-        self._thread.start()
-        print(f"[sea-sim] started speed={self.speed}x vessels={self.vessels_loaded} sim_now={self.sim_now.isoformat()}")
+        print(f"[sea-sim] ready speed={self.speed}x vessels={self.vessels_loaded} sim_now={self.sim_now.isoformat()}")
+
+    def _backfill_cargo_lines(self, db):
+        """为历史容器补 1 条 FCL 主票（镜像箱级字段），保证每箱至少 1 票。"""
+        # LEFT JOIN 找孤儿（无 cargo_lines 的容器），避免 NOT IN 大集合超出 SQLite 参数上限
+        containers = db.query(SeaContainer).outerjoin(
+            CargoLine, CargoLine.container_number == SeaContainer.container_number
+        ).filter(CargoLine.id.is_(None)).all()
+        added = 0
+        for c in containers:
+            db.add(CargoLine(
+                container_number=c.container_number, line_number=1,
+                commodity_code=c.commodity_code, commodity_desc=c.commodity_desc,
+                customer_name=c.customer_name, customer_tier=c.customer_tier,
+                declared_value_nzd=c.declared_value_nzd,
+                gross_weight_kg=c.gross_weight_kg,
+                service_level=c.service_level, sla_tier=c.sla_tier,
+                temp_min_c=c.temp_min_c, temp_max_c=c.temp_max_c,
+                scheduled_delivery=c.scheduled_delivery,
+                sla_deadline=c.sla_deadline,
+                sla_grace_deadline=c.sla_grace_deadline,
+                is_sla_breached=c.is_sla_breached,
+                breach_type=c.breach_type, sla_penalty_nzd=c.sla_penalty_nzd,
+            ))
+            added += 1
+            if added % 500 == 0:
+                db.commit()
+        if added:
+            db.commit()
+            print(f"[sea-sim] backfilled {added} cargo lines for legacy containers")
 
     def stop(self):
         self.running = False
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
         print("[sea-sim] stopped")
 
     def set_speed(self, speed):
-        self.speed = max(0.0, min(float(speed), 3600.0))
+        world_clock.set_speed(speed)
 
-    def _run(self):
-        while not self._stop_event.is_set():
-            t0 = time.monotonic()
-            if not self.paused:
-                now_real = time.monotonic()
-                elapsed = now_real - self._last_real
-                self._last_real = now_real
-                self.sim_now += timedelta(seconds=elapsed * self.speed)
-                try:
-                    self.tick()
-                except Exception as e:
-                    print(f"[sea-sim] tick error: {e}")
-            time.sleep(max(0.1, settings.sea_sim_tick_seconds - (time.monotonic() - t0)))
+    @property
+    def speed(self):
+        """Global world speed (single clock shared by all modes)."""
+        return world_clock.speed
+
+    @property
+    def paused(self):
+        """Global world pause state (single clock shared by all modes)."""
+        return world_clock.paused
+
+    @paused.setter
+    def paused(self, value):
+        world_clock.paused = value
+
+
 
     # ----------------------------------------------------------
     # 初始化
@@ -240,7 +266,9 @@ class SeaFreightSimulator:
         self._generated_vessels.add(visit.vessel_visit_id)
         # 环境事件驱动船舶延误
         if visit.vessel_status == "EXPECTED":
-            events = self._active_events.get(visit.port_code, [])
+            now = self.sim_now
+            events = [e for e in self._active_events.get(visit.port_code, [])
+                      if e.get("impact_at", now) <= now <= e["ends_at"]]
             if events:
                 event = random.choice(events)
                 delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
@@ -272,22 +300,39 @@ class SeaFreightSimulator:
             direction = "import" if random.random() < 0.55 else "export"
 
         pool = IMPORT_COMMODITIES if direction == "import" else EXPORT_COMMODITIES
-        desc, hs, value_range, tiers, ctype, temp = random.choice(pool)
-        value = random.randint(*value_range)
+
+        # 拼箱（LCL）：~40% 的箱装多票货，每票独立货主/货值/SLA
+        is_lcl = random.random() < 0.4
+        n_lines = random.randint(2, 6) if is_lcl else 1
+
+        # 逐票生成货物数据
+        lines_meta = []
+        for _ in range(n_lines):
+            _desc, _hs, _vr, _tiers, _ctype, _temp = random.choice(pool)
+            _customer, _tier = random.choice(CUSTOMERS)
+            if random.random() < 0.08:
+                _tier = "VIP"
+            elif _tier == "VIP" and random.random() < 0.7:
+                _tier = "high"
+            _svc = random.choices(["priority", "standard", "economy"], weights=[0.2, 0.6, 0.2])[0]
+            lines_meta.append({
+                "desc": _desc, "hs": _hs, "value": random.randint(*_vr),
+                "ctype": _ctype, "temp": _temp, "customer": _customer,
+                "tier": _tier, "svc": _svc,
+            })
+
+        # 主票 = 最高货值票（箱级字段镜像它，保持向后兼容）
+        main = max(lines_meta, key=lambda d: d["value"])
+        desc, hs, value = main["desc"], main["hs"], main["value"]
+        ctype, temp = main["ctype"], main["temp"]
+        customer, tier = main["customer"], main["tier"]
+        service_level = main["svc"]
+        policy = get_policy("sea", service_level)
 
         size = random.choices(["20FT", "40FT", "40HC"], weights=[0.4, 0.4, 0.2])[0]
         if ctype == "RF":
             size = "40HC" if random.random() < 0.5 else "40FT"
         weight = round(random.uniform(8000, 28000) if size == "20FT" else random.uniform(15000, 30000), 0)
-
-        customer, tier = random.choice(CUSTOMERS)
-        if random.random() < 0.08:
-            tier = "VIP"
-        elif tier == "VIP" and random.random() < 0.7:
-            tier = "high"
-
-        service_level = random.choices(["priority", "standard", "economy"], weights=[0.2, 0.6, 0.2])[0]
-        policy = get_policy("sea", service_level)
 
         temp_min, temp_max = (None, None)
         if temp:
@@ -310,6 +355,7 @@ class SeaFreightSimulator:
             temp_required_c=temp_min, temp_min_c=temp_min, temp_max_c=temp_max,
             is_dg=is_dg, dg_class="3" if is_dg else None, un_number="UN1133" if is_dg else None,
             current_status="at_sea",
+            is_lcl=is_lcl,
             scheduled_delivery=arrival + timedelta(hours=policy["transit_hours"]),
             sla_deadline=sla_deadline,
             sla_grace_deadline=sla_deadline + timedelta(hours=policy["grace_hours"]),
@@ -317,6 +363,23 @@ class SeaFreightSimulator:
         db.add(container)
         db.flush()
         self.containers_generated += 1
+
+        # 票级货物行（LCL 多票 / FCL 单票），每票独立 SLA
+        for i, lm in enumerate(lines_meta):
+            _lp = get_policy("sea", lm["svc"])
+            _dl = arrival + timedelta(hours=_lp["transit_hours"])
+            _ltmin, _ltmax = (lm["temp"][0], lm["temp"][1]) if lm["temp"] else (None, None)
+            db.add(CargoLine(
+                container_number=cn, line_number=i + 1,
+                commodity_code=lm["hs"], commodity_desc=lm["desc"],
+                customer_name=lm["customer"], customer_tier=lm["tier"],
+                declared_value_nzd=float(lm["value"]),
+                gross_weight_kg=round(weight / n_lines, 0),
+                service_level=lm["svc"], sla_tier=lm["svc"],
+                temp_min_c=_ltmin, temp_max_c=_ltmax,
+                scheduled_delivery=_dl, sla_deadline=_dl,
+                sla_grace_deadline=_dl + timedelta(hours=_lp["grace_hours"]),
+            ))
 
         if visit.delay_minutes > 0:
             self._create_exception(
@@ -475,6 +538,14 @@ class SeaFreightSimulator:
         c.current_status = "available"
         c.available_at = ts
         self._insert_event(db, cn, "AVC", "Container available for collection", port, ts=ts)
+        # 多式联运：进口集装箱可提 → 生成陆运集疏运腿
+        if c.direction == "import":
+            from world.shipments import create_road_drayage, PORT_CITY
+            city = PORT_CITY.get(port)
+            if city:
+                create_road_drayage(db, "sea", c.container_number, city,
+                                    c.commodity_desc, c.customer_name, c.customer_tier,
+                                    c.declared_value_nzd, c.gross_weight_kg, c.available_at)
         if c.discharged_at:
             dwell = (c.available_at - c.discharged_at).total_seconds() / 3600
             anomaly = detector.observe("sea", "DIS_AVC", dwell)
@@ -523,6 +594,29 @@ class SeaFreightSimulator:
             c.is_sla_breached = is_breached
             c.breach_type = breach_type
             c.sla_penalty_nzd = penalty
+
+        # 票级 SLA 判定：LCL 箱内每票货独立判罚
+        for line in db.query(CargoLine).filter(CargoLine.container_number == cn).all():
+            lpolicy = get_policy("sea", line.service_level or "standard")
+            l_breached, l_type, l_penalty = evaluate_breach(
+                c.delivered_at, line.sla_deadline, lpolicy["grace_hours"], lpolicy["penalty_pct"],
+                line.declared_value_nzd, excused)
+            if l_breached or l_type:
+                line.is_sla_breached = l_breached
+                line.breach_type = l_type
+                line.sla_penalty_nzd = l_penalty
+            # 票级异常：该票正式违约时，生成只针对该票的异常并通知该票货主
+            if l_breached:
+                late_hours = max(0.0, (c.delivered_at - line.sla_deadline).total_seconds() / 3600)
+                self._create_exception(
+                    db, c, "sla_breach",
+                    f"票{line.line_number} {line.commodity_desc} SLA 违约（晚于截止 {line.sla_deadline.strftime('%m-%d %H:%M')}）",
+                    late_hours,
+                    f"Cargo line {line.line_number} ({line.commodity_desc}, {line.customer_name}) "
+                    f"exceeded its SLA commitment. Estimated penalty {l_penalty or 0:.0f} NZD.",
+                    ["waive", "compensate"],
+                    cargo_line=line,
+                )
 
     def _on_customs_hold(self, db, payload):
         cn, port = payload
@@ -621,13 +715,22 @@ class SeaFreightSimulator:
             ["redelivery", "reschedule", "depot_collection"]
         )
 
-    def _create_exception(self, db, container, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None):
+    def _create_exception(self, db, container, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None, cargo_line=None):
+        # 票级异常时用票的货物字段（货主/货值/温度/SLA/HS），通知也只发给该票货主
+        _value = cargo_line.declared_value_nzd if cargo_line else container.declared_value_nzd
+        _tier = cargo_line.customer_tier if cargo_line else container.customer_tier
+        _hs = cargo_line.commodity_code if cargo_line else container.commodity_code
+        _temp_required = (cargo_line.temp_min_c is not None) if cargo_line else (container.temp_min_c is not None)
+        _sla_dl = cargo_line.sla_deadline if cargo_line else container.sla_deadline
+        _customer = cargo_line.customer_name if cargo_line else container.customer_name
+        _ref = container.container_number + (f"/票{cargo_line.line_number}" if cargo_line else "")
+
         eff_delivery = container.estimated_delivery or (self.sim_now + timedelta(hours=delay_hours))
-        sla_breach = (eff_delivery - container.sla_deadline).total_seconds() / 3600 if container.sla_deadline else delay_hours
+        sla_breach = (eff_delivery - _sla_dl).total_seconds() / 3600 if _sla_dl else delay_hours
         mapped = "delay" if exc_type == "vessel_delay" else exc_type
         score = calculate_risk_score(
-            cargo_value=container.declared_value_nzd,
-            customer_tier=container.customer_tier,
+            cargo_value=_value,
+            customer_tier=_tier,
             sla_breach_hours=sla_breach,
             exception_type=mapped
         )
@@ -635,14 +738,14 @@ class SeaFreightSimulator:
         severity = calculate_severity(
             score, sla_breach, exc_type,
             is_dg=container.is_dg,
-            temp_required=container.temp_min_c is not None,
-            perishable=(container.commodity_code or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
+            temp_required=_temp_required,
+            perishable=(_hs or "").startswith(("02", "03", "04", "05", "07", "08", "16", "20", "21")),
         )
         cls = classifier.classify_and_learn(root_cause or diagnosis or "", exc_type)
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
-        cost = estimate_recovery_cost(exc_type, container.declared_value_nzd)
-        best_action, action_reason = select_best_recovery(category, container.declared_value_nzd, container.customer_tier)
+        cost = estimate_recovery_cost(exc_type, _value)
+        best_action, action_reason = select_best_recovery(category, _value, _tier)
         if cls["is_ood"] and settings.llm_enabled:
             diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
@@ -654,6 +757,7 @@ class SeaFreightSimulator:
         exc = SeaException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             container_number=container.container_number,
+            cargo_line_id=cargo_line.id if cargo_line else None,
             exception_type=exc_type,
             severity=severity,
             risk_level=risk_level,
@@ -684,7 +788,7 @@ class SeaFreightSimulator:
         self.exceptions_generated += 1
         db.add(exc)
         db.flush()
-        self._notify(db, exc, container.customer_name, container.container_number,
+        self._notify(db, exc, _customer, _ref,
                      category, root_cause, recovery, cls["classification_confidence"],
                      container.estimated_delivery)
 
@@ -762,7 +866,7 @@ class SeaFreightSimulator:
                 db.commit()
                 if (self.sim_now - self._last_env_event_sim) > timedelta(hours=2):
                     self._generate_env_events(db)
-                    self._cleanup_env_events()
+                    self._cleanup_env_events(db)
                     self._last_env_event_sim = self.sim_now
                 if (self.sim_now - self._last_missing_check_sim) > timedelta(hours=2):
                     self._run_missing_event_detection(db)
@@ -774,20 +878,30 @@ class SeaFreightSimulator:
                 db.close()
 
     def _generate_env_events(self, db):
+        # 世界天气驱动的环境事件（天气 → 延误 因果链）
+        from world.causality import weather_events_for_mode
+        for loc, event in weather_events_for_mode(db, "sea", self.sim_now, self._active_events):
+            db.add(event)
+            self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at, "impact_at": event.impact_at})
+        # 少量随机非天气事件（事故/机械等）保持真实感
         from environment_events import SEA_LOCATIONS
-        for _ in range(random.randint(1, 2)):
+        if random.random() < 0.25:
             loc = random.choice(SEA_LOCATIONS)
             event = generate_event(db, "sea", loc, self.sim_now)
             if event:
                 self._active_events.setdefault(loc, []).append({"event_type": event.event_type, "severity": event.severity, "description": event.description, "ends_at": event.ends_at})
         db.commit()
 
-    def _cleanup_env_events(self):
+    def _cleanup_env_events(self, db):
         now = self.sim_now
         for loc in list(self._active_events.keys()):
             self._active_events[loc] = [e for e in self._active_events[loc] if e["ends_at"] >= now]
             if not self._active_events[loc]:
                 del self._active_events[loc]
+        # purge expired events from the DB so it doesn't grow unbounded
+        from environment_models import EnvironmentEvent
+        db.query(EnvironmentEvent).filter(
+            EnvironmentEvent.mode == "sea", EnvironmentEvent.ends_at < now).delete()
 
     def _run_missing_event_detection(self, db):
         """Flag containers whose next milestone is overdue (missing expected event)."""

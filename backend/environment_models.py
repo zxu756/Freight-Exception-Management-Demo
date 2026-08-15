@@ -26,11 +26,20 @@ class EnvironmentEvent(Base):
     description = Column(Text, nullable=False)  # 事实描述 / 路况信息
     started_at = Column(DateTime, nullable=False)
     ends_at = Column(DateTime, nullable=False)
+    # 实际开始影响班次的时刻（缓冲期后）。雪/雨等需要累积，一开始不封路，
+    # 过了 impact_at 才真正造成延误；impact_at 之前是"预测期"。
+    impact_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     @property
     def is_active(self, now):
         return self.started_at <= now <= self.ends_at
+
+    @property
+    def is_impacting(self, now):
+        """已过缓冲期，正在实际影响班次。"""
+        impact = self.impact_at or self.started_at
+        return impact <= now <= self.ends_at
 
 
 # 各运输方式的事件类型 → 延误原因码

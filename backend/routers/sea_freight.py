@@ -8,7 +8,7 @@ from typing import Optional
 
 from database import get_db
 from sea_freight_models import (
-    SeaPort, VesselVisit, SeaContainer, SeaTrackingEvent, SeaException
+    SeaPort, VesselVisit, SeaContainer, SeaTrackingEvent, SeaException, CargoLine
 )
 
 router = APIRouter()
@@ -143,11 +143,16 @@ async def get_container_detail(container_number: str, db: Session = Depends(get_
     vessel = db.query(VesselVisit).filter(
         VesselVisit.vessel_visit_id == container.vessel_visit_id).first()
 
+    cargo_lines = db.query(CargoLine).filter(
+        CargoLine.container_number == container_number
+    ).order_by(CargoLine.line_number.asc()).all()
+
     return {
         "container_number": container.container_number,
         "direction": container.direction,
         "size": container.size,
         "container_type": container.container_type,
+        "is_lcl": container.is_lcl,
         "vessel": {
             "vessel_name": vessel.vessel_name if vessel else None,
             "vessel_operator": vessel.vessel_operator if vessel else None,
@@ -226,6 +231,57 @@ async def get_container_detail(container_number: str, db: Session = Depends(get_
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
+        ],
+        "cargo_lines": [
+            {
+                "line_number": l.line_number,
+                "commodity_desc": l.commodity_desc,
+                "commodity_code": l.commodity_code,
+                "customer_name": l.customer_name,
+                "customer_tier": l.customer_tier,
+                "declared_value_nzd": l.declared_value_nzd,
+                "gross_weight_kg": l.gross_weight_kg,
+                "service_level": l.service_level,
+                "scheduled_delivery": l.scheduled_delivery.isoformat() if l.scheduled_delivery else None,
+                "sla_deadline": l.sla_deadline.isoformat() if l.sla_deadline else None,
+                "is_sla_breached": l.is_sla_breached,
+                "breach_type": l.breach_type,
+                "sla_penalty_nzd": l.sla_penalty_nzd
+            }
+            for l in cargo_lines
+        ]
+    }
+
+
+@router.get("/sea/containers/{container_number}/lines")
+async def get_container_lines(container_number: str, db: Session = Depends(get_db)):
+    """List the individual cargo lines (consignments) inside a container."""
+    lines = db.query(CargoLine).filter(
+        CargoLine.container_number == container_number
+    ).order_by(CargoLine.line_number.asc()).all()
+    return {
+        "container_number": container_number,
+        "count": len(lines),
+        "lines": [
+            {
+                "line_number": l.line_number,
+                "commodity_desc": l.commodity_desc,
+                "commodity_code": l.commodity_code,
+                "customer_name": l.customer_name,
+                "customer_tier": l.customer_tier,
+                "declared_value_nzd": l.declared_value_nzd,
+                "gross_weight_kg": l.gross_weight_kg,
+                "service_level": l.service_level,
+                "sla_tier": l.sla_tier,
+                "temp_min_c": l.temp_min_c,
+                "temp_max_c": l.temp_max_c,
+                "scheduled_delivery": l.scheduled_delivery.isoformat() if l.scheduled_delivery else None,
+                "sla_deadline": l.sla_deadline.isoformat() if l.sla_deadline else None,
+                "is_sla_breached": l.is_sla_breached,
+                "breach_type": l.breach_type,
+                "sla_penalty_nzd": l.sla_penalty_nzd
+            }
+            for l in lines
         ]
     }
 
@@ -326,15 +382,17 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "container_number": container.container_number if container else exc.container_number,
-            "commodity_desc": container.commodity_desc if container else None,
-            "declared_value_nzd": container.declared_value_nzd if container else None,
-            "customer_name": container.customer_name if container else None,
-            "customer_tier": container.customer_tier if container else None,
-            "service_level": container.service_level if container else None,
-            "sla_tier": container.sla_tier if container else None,
-            "is_sla_breached": container.is_sla_breached if container else False,
-            "breach_type": container.breach_type if container else None,
-            "sla_penalty_nzd": container.sla_penalty_nzd if container else None,
+            "cargo_line_id": exc.cargo_line_id,
+            "line_number": exc.cargo_line.line_number if exc.cargo_line else None,
+            "commodity_desc": exc.cargo_line.commodity_desc if exc.cargo_line else (container.commodity_desc if container else None),
+            "declared_value_nzd": exc.cargo_line.declared_value_nzd if exc.cargo_line else (container.declared_value_nzd if container else None),
+            "customer_name": exc.cargo_line.customer_name if exc.cargo_line else (container.customer_name if container else None),
+            "customer_tier": exc.cargo_line.customer_tier if exc.cargo_line else (container.customer_tier if container else None),
+            "service_level": exc.cargo_line.service_level if exc.cargo_line else (container.service_level if container else None),
+            "sla_tier": exc.cargo_line.sla_tier if exc.cargo_line else (container.sla_tier if container else None),
+            "is_sla_breached": exc.cargo_line.is_sla_breached if exc.cargo_line else (container.is_sla_breached if container else False),
+            "breach_type": exc.cargo_line.breach_type if exc.cargo_line else (container.breach_type if container else None),
+            "sla_penalty_nzd": exc.cargo_line.sla_penalty_nzd if exc.cargo_line else (container.sla_penalty_nzd if container else None),
             "size": container.size if container else None,
             "direction": container.direction if container else None,
         },
@@ -559,3 +617,66 @@ async def control_sea_sim(body: dict, db: Session = Depends(get_db)):
         "speed": simulator.speed,
         "sim_now": simulator.sim_now.isoformat()
     }
+
+@router.post("/sea/env/event")
+async def trigger_sea_env_event(body: dict, db: Session = Depends(get_db)):
+    """手动注入一个环境事件（用于演示特定场景，如"奥克兰港拥堵"）"""
+    from datetime import timedelta
+    from environment_events import EVENT_TEMPLATES, SEA_LOCATIONS
+    from environment_models import EnvironmentEvent
+    from sea_freight_simulator import simulator
+
+    location = body.get("location", "NZAKL")
+    if location not in SEA_LOCATIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown location: {location}")
+    event_type = body.get("event_type", "port_congestion")
+    severity = body.get("severity", "severe")
+    duration_hours = float(body.get("duration_hours", 12))
+
+    templates = EVENT_TEMPLATES.get("sea", {})
+    description = body.get("description") or templates.get(event_type, "{loc} 附近异常").format(loc=location)
+
+    now = simulator.sim_now
+    event = EnvironmentEvent(
+        event_type=event_type, mode="sea", location=location,
+        severity=severity, description=description,
+        started_at=now, ends_at=now + timedelta(hours=duration_hours),
+    )
+    db.add(event)
+    db.commit()
+    simulator._active_events.setdefault(location, []).append({
+        "event_type": event.event_type, "severity": event.severity,
+        "description": event.description, "ends_at": event.ends_at,
+    })
+    return {
+        "success": True,
+        "event": {
+            "event_type": event.event_type, "location": event.location,
+            "severity": event.severity, "description": event.description,
+            "started_at": event.started_at.isoformat(), "ends_at": event.ends_at.isoformat(),
+        }
+    }
+
+@router.get("/sea/env/events")
+async def get_sea_freight_env_events(db: Session = Depends(get_db)):
+    """查活跃环境事件（实时路况通报）"""
+    from environment_models import EnvironmentEvent
+    from sea_freight_simulator import simulator
+    now = simulator.sim_now
+    events = db.query(EnvironmentEvent).filter(
+        EnvironmentEvent.mode == "sea",
+        EnvironmentEvent.started_at <= now,
+        EnvironmentEvent.ends_at >= now,
+    ).all()
+    return {
+        "count": len(events),
+        "events": [
+            {
+                "event_type": e.event_type, "location": e.location,
+                "severity": e.severity, "description": e.description,
+                "ends_at": e.ends_at.isoformat(),
+            }
+            for e in events
+        ]
+    }
+

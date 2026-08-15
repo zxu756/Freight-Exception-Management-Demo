@@ -33,8 +33,20 @@ export const airAPI = {
     const response = await api.get('/air/kpi');
     return response.data;
   },
+  getEnvEvents: async () => {
+    const response = await api.get('/air/env/events');
+    return response.data;
+  },
+  triggerEnvEvent: async (body: Record<string, unknown>) => {
+    const response = await api.post('/air/env/event', body);
+    return response.data;
+  },
   getException: async (exceptionId: string) => {
     const response = await api.get(`/air/exceptions/${exceptionId}`);
+    return response.data;
+  },
+  getLines: async (ref: string) => {
+    const response = await api.get(`/air/waybills/${ref}/house-bills`);
     return response.data;
   },
   control: async (action: string, speed?: number) => {
@@ -56,8 +68,24 @@ export const roadAPI = {
     const response = await api.get('/road/kpi');
     return response.data;
   },
+  getSegments: async () => {
+    const response = await api.get('/road/segments');
+    return response.data;
+  },
+  getEnvEvents: async () => {
+    const response = await api.get('/road/env/events');
+    return response.data;
+  },
+  triggerEnvEvent: async (body: Record<string, unknown>) => {
+    const response = await api.post('/road/env/event', body);
+    return response.data;
+  },
   getException: async (exceptionId: string) => {
     const response = await api.get(`/road/exceptions/${exceptionId}`);
+    return response.data;
+  },
+  getLines: async (ref: string) => {
+    const response = await api.get(`/road/consignments/${ref}/lines`);
     return response.data;
   },
   control: async (action: string, speed?: number) => {
@@ -79,14 +107,38 @@ export const seaAPI = {
     const response = await api.get('/sea/kpi');
     return response.data;
   },
+  getEnvEvents: async () => {
+    const response = await api.get('/sea/env/events');
+    return response.data;
+  },
+  triggerEnvEvent: async (body: Record<string, unknown>) => {
+    const response = await api.post('/sea/env/event', body);
+    return response.data;
+  },
   getException: async (exceptionId: string) => {
     const response = await api.get(`/sea/exceptions/${exceptionId}`);
+    return response.data;
+  },
+  getLines: async (ref: string) => {
+    const response = await api.get(`/sea/containers/${ref}/lines`);
     return response.data;
   },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/sea/sim/control', { action, speed });
     return response.data;
   },
+};
+
+// ---- World (God Panel) API ----
+export const worldAPI = {
+  getClock: async () => (await api.get('/world/clock')).data,
+  controlClock: async (body: Record<string, unknown>) => (await api.post('/world/clock/control', body)).data,
+  getWeather: async () => (await api.get('/world/weather')).data,
+  setWeatherOverride: async (body: Record<string, unknown>) => (await api.post('/world/weather/override', body)).data,
+  clearWeather: async () => (await api.post('/world/weather/clear', {})).data,
+  getState: async () => (await api.get('/world/state')).data,
+  getShipments: async () => (await api.get('/world/shipments')).data,
+  getPredictions: async () => (await api.get('/world/predictions')).data,
 };
 
 export default api;

@@ -52,6 +52,7 @@ const ExceptionDetail = () => {
   const { mode, exceptionId } = useParams();
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState(false);
+  const [siblingLines, setSiblingLines] = useState<any[] | null>(null);
 
   useEffect(() => {
     const api = APIS[mode ?? ''];
@@ -60,6 +61,16 @@ const ExceptionDetail = () => {
       .then(setData)
       .catch(() => setError(true));
   }, [mode, exceptionId]);
+
+  // 票级异常：加载同箱/同单/同主单的全部票做对比
+  const lineNumber = data?.cargo?.line_number;
+  const refNumber = data?.cargo?.container_number;
+  useEffect(() => {
+    if (!data || !lineNumber || !refNumber || !mode) { setSiblingLines(null); return; }
+    APIS[mode]?.getLines(refNumber)
+      .then((d: any) => setSiblingLines(d.lines ?? d.house_waybills ?? []))
+      .catch(() => setSiblingLines(null));
+  }, [data, lineNumber, refNumber, mode]);
 
   if (error) {
     return (
@@ -106,7 +117,14 @@ const ExceptionDetail = () => {
           <div className="flex items-center gap-3">
             <Package className="w-5 h-5 text-gray-500" />
             <div className="flex-1">
-              <p className="font-medium text-gray-900">{data.cargo?.commodity_desc ?? '未知货物'}</p>
+              <p className="font-medium text-gray-900">
+                {data.cargo?.commodity_desc ?? '未知货物'}
+                {lineNumber && (
+                  <span className="ml-2 inline-block px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] align-middle font-semibold">
+                    第 {lineNumber} 票
+                  </span>
+                )}
+              </p>
               <p className="text-xs text-gray-500">
                 {data.cargo?.customer_name ?? '未知客户'}
                 {data.cargo?.customer_tier ? ` · ${data.cargo.customer_tier} 客户` : ''}
@@ -131,6 +149,41 @@ const ExceptionDetail = () => {
             </div>
           </div>
         </div>
+
+        {/* 同箱/同单全部票（票级异常对比） */}
+        {siblingLines && siblingLines.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Package className="w-5 h-5 text-purple-600" />
+              <h3 className="font-semibold text-gray-900">
+                同一装载单元的全部票 <span className="text-xs text-gray-400 font-normal">（{siblingLines.length} 票，各自独立 SLA）</span>
+              </h3>
+            </div>
+            <div className="space-y-1.5">
+              {siblingLines.map((l: any) => {
+                const label = l.line_number != null ? '票' + l.line_number : (l.hawb_number ?? '—');
+                const isCurrent = (l.line_number ?? null) === (lineNumber ?? null);
+                const breached = !!l.is_sla_breached;
+                return (
+                  <div key={label + (l.customer_name ?? '')} className={'flex items-center justify-between px-3 py-1.5 rounded border ' + (isCurrent ? 'border-purple-300 bg-purple-50' : breached ? 'border-red-200 bg-red-50' : 'border-gray-200')}>
+                    <span className="text-sm">
+                      <span className="font-medium">{label}</span>
+                      {isCurrent && <span className="ml-1.5 text-[10px] text-purple-600 font-semibold">← 本异常</span>}
+                      <span className="text-gray-500 ml-1.5">{l.customer_name} ({l.customer_tier}) · {l.service_level} · 货值 {'$' + (l.declared_value_nzd ?? 0).toLocaleString()}</span>
+                    </span>
+                    <span className="text-xs shrink-0">
+                      {breached
+                        ? <span className="text-red-600 font-medium">违约{l.breach_type === 'excused' ? '(豁免)' : ''}{l.sla_penalty_nzd ? ' · 罚金 $' + l.sla_penalty_nzd.toLocaleString() : ''}</span>
+                        : <span className="text-green-600">达标</span>}
+                      {l.sla_deadline && <span className="text-gray-400 ml-2">截止 {l.sla_deadline.slice(5, 16).replace('T', ' ')}</span>}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-2">票级粒度：同一箱/单里的每票货独立判定 SLA，只有违约的那一票产生本异常并通知其货主。</p>
+          </div>
+        )}
 
         {/* 步骤 1：检测 */}
         <Step n={1} icon={Search} title="Delay detected" subtitle="异常检测">

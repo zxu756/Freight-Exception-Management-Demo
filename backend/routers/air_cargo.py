@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from database import get_db
 from air_cargo_models import (
-    Airport, AirFlight, AirWaybill, AirTrackingEvent, AirCustomsInspection, AirException
+    Airport, AirFlight, AirWaybill, AirTrackingEvent, AirCustomsInspection, AirException, HouseWaybill
 )
 
 router = APIRouter()
@@ -194,9 +194,14 @@ async def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
         AirException.awb_number == awb_number
     ).all()
 
+    house_waybills = db.query(HouseWaybill).filter(
+        HouseWaybill.awb_number == awb_number
+    ).all()
+
     return {
         "awb_number": waybill.awb_number,
         "hawb_number": waybill.hawb_number,
+        "is_consolidated": waybill.is_consolidated,
         "route_type": waybill.route_type,
         "origin": waybill.origin_airport,
         "destination": waybill.destination_airport,
@@ -290,6 +295,56 @@ async def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
                 "detected_at": x.detected_at.isoformat()
             }
             for x in exceptions
+        ],
+        "house_waybills": [
+            {
+                "hawb_number": h.hawb_number,
+                "commodity_desc": h.commodity_desc,
+                "commodity_code": h.commodity_code,
+                "customer_name": h.customer_name,
+                "customer_tier": h.customer_tier,
+                "declared_value_nzd": h.declared_value_nzd,
+                "gross_weight_kg": h.gross_weight_kg,
+                "service_level": h.service_level,
+                "sla_deadline": h.sla_deadline.isoformat() if h.sla_deadline else None,
+                "is_sla_breached": h.is_sla_breached,
+                "breach_type": h.breach_type,
+                "sla_penalty_nzd": h.sla_penalty_nzd
+            }
+            for h in house_waybills
+        ]
+    }
+
+
+@router.get("/air/waybills/{awb_number}/house-bills")
+async def get_house_waybills(awb_number: str, db: Session = Depends(get_db)):
+    """List the house waybills (HAWB consignments) inside a master waybill."""
+    bills = db.query(HouseWaybill).filter(
+        HouseWaybill.awb_number == awb_number
+    ).all()
+    return {
+        "awb_number": awb_number,
+        "count": len(bills),
+        "house_waybills": [
+            {
+                "hawb_number": h.hawb_number,
+                "commodity_desc": h.commodity_desc,
+                "commodity_code": h.commodity_code,
+                "customer_name": h.customer_name,
+                "customer_tier": h.customer_tier,
+                "declared_value_nzd": h.declared_value_nzd,
+                "pieces": h.pieces,
+                "gross_weight_kg": h.gross_weight_kg,
+                "service_level": h.service_level,
+                "sla_tier": h.sla_tier,
+                "temp_min_c": h.temp_min_c,
+                "temp_max_c": h.temp_max_c,
+                "sla_deadline": h.sla_deadline.isoformat() if h.sla_deadline else None,
+                "is_sla_breached": h.is_sla_breached,
+                "breach_type": h.breach_type,
+                "sla_penalty_nzd": h.sla_penalty_nzd
+            }
+            for h in bills
         ]
     }
 
@@ -365,6 +420,7 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="Exception not found")
 
     waybill = db.query(AirWaybill).filter(AirWaybill.awb_number == exc.awb_number).first()
+    hawb = db.query(HouseWaybill).filter(HouseWaybill.id == exc.hawb_id).first() if exc.hawb_id else None
 
     from notification_models import ExceptionNotification
     notifications = db.query(ExceptionNotification).filter(
@@ -399,20 +455,17 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "awb_number": waybill.awb_number if waybill else exc.awb_number,
-            "commodity_desc": waybill.commodity_desc if waybill else None,
-            "declared_value_nzd": waybill.declared_value_nzd if waybill else None,
-            "customer_name": waybill.customer_name if waybill else None,
-            "customer_tier": waybill.customer_tier if waybill else None,
-            "service_level": waybill.service_level if waybill else None,
-            "sla_tier": waybill.sla_tier if waybill else None,
-            "is_sla_breached": waybill.is_sla_breached if waybill else False,
-            "breach_type": waybill.breach_type if waybill else None,
-            "sla_penalty_nzd": waybill.sla_penalty_nzd if waybill else None,
-            "service_level": waybill.service_level if waybill else None,
-            "sla_tier": waybill.sla_tier if waybill else None,
-            "is_sla_breached": waybill.is_sla_breached if waybill else False,
-            "breach_type": waybill.breach_type if waybill else None,
-            "sla_penalty_nzd": waybill.sla_penalty_nzd if waybill else None,
+            "hawb_id": exc.hawb_id,
+            "hawb_number": hawb.hawb_number if hawb else None,
+            "commodity_desc": hawb.commodity_desc if hawb else (waybill.commodity_desc if waybill else None),
+            "declared_value_nzd": hawb.declared_value_nzd if hawb else (waybill.declared_value_nzd if waybill else None),
+            "customer_name": hawb.customer_name if hawb else (waybill.customer_name if waybill else None),
+            "customer_tier": hawb.customer_tier if hawb else (waybill.customer_tier if waybill else None),
+            "service_level": hawb.service_level if hawb else (waybill.service_level if waybill else None),
+            "sla_tier": hawb.sla_tier if hawb else (waybill.sla_tier if waybill else None),
+            "is_sla_breached": hawb.is_sla_breached if hawb else (waybill.is_sla_breached if waybill else False),
+            "breach_type": hawb.breach_type if hawb else (waybill.breach_type if waybill else None),
+            "sla_penalty_nzd": hawb.sla_penalty_nzd if hawb else (waybill.sla_penalty_nzd if waybill else None),
             "route_type": waybill.route_type if waybill else None,
         },
         "notifications": [
@@ -690,3 +743,66 @@ async def control_air_sim(body: dict, db: Session = Depends(get_db)):
         "speed": simulator.speed,
         "sim_now": simulator.sim_now.isoformat()
     }
+
+@router.post("/air/env/event")
+async def trigger_air_env_event(body: dict, db: Session = Depends(get_db)):
+    """手动注入一个环境事件（用于演示特定场景，如"皇后镇大雾"）"""
+    from datetime import timedelta
+    from environment_events import EVENT_TEMPLATES, AIR_LOCATIONS
+    from environment_models import EnvironmentEvent
+    from air_cargo_simulator import simulator
+
+    location = body.get("location", "AKL")
+    if location not in AIR_LOCATIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown location: {location}")
+    event_type = body.get("event_type", "weather")
+    severity = body.get("severity", "severe")
+    duration_hours = float(body.get("duration_hours", 12))
+
+    templates = EVENT_TEMPLATES.get("air", {})
+    description = body.get("description") or templates.get(event_type, "{loc} 附近异常").format(loc=location)
+
+    now = simulator.sim_now
+    event = EnvironmentEvent(
+        event_type=event_type, mode="air", location=location,
+        severity=severity, description=description,
+        started_at=now, ends_at=now + timedelta(hours=duration_hours),
+    )
+    db.add(event)
+    db.commit()
+    simulator._active_events.setdefault(location, []).append({
+        "event_type": event.event_type, "severity": event.severity,
+        "description": event.description, "ends_at": event.ends_at,
+    })
+    return {
+        "success": True,
+        "event": {
+            "event_type": event.event_type, "location": event.location,
+            "severity": event.severity, "description": event.description,
+            "started_at": event.started_at.isoformat(), "ends_at": event.ends_at.isoformat(),
+        }
+    }
+
+@router.get("/air/env/events")
+async def get_air_cargo_env_events(db: Session = Depends(get_db)):
+    """查活跃环境事件（实时路况通报）"""
+    from environment_models import EnvironmentEvent
+    from air_cargo_simulator import simulator
+    now = simulator.sim_now
+    events = db.query(EnvironmentEvent).filter(
+        EnvironmentEvent.mode == "air",
+        EnvironmentEvent.started_at <= now,
+        EnvironmentEvent.ends_at >= now,
+    ).all()
+    return {
+        "count": len(events),
+        "events": [
+            {
+                "event_type": e.event_type, "location": e.location,
+                "severity": e.severity, "description": e.description,
+                "ends_at": e.ends_at.isoformat(),
+            }
+            for e in events
+        ]
+    }
+

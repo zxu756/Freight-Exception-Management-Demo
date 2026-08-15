@@ -69,7 +69,8 @@ class AirWaybill(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     awb_number = Column(String(15), unique=True, nullable=False, index=True)  # "086-12345678"
-    hawb_number = Column(String(15), nullable=True)  # 分运单号（拼装货）
+    hawb_number = Column(String(15), nullable=True)  # 分运单号（拼装货，指向主分运单）
+    is_consolidated = Column(Boolean, default=False)  # 集运：主运单下多个分运单（HAWB），各票独立货主/SLA
     route_type = Column(String(20), nullable=False)  # 'domestic', 'international', 'transshipment'
     origin_airport = Column(String(3), ForeignKey("airports.iata_code"), nullable=False)
     destination_airport = Column(String(3), ForeignKey("airports.iata_code"), nullable=False)
@@ -122,8 +123,46 @@ class AirWaybill(Base):
     origin = relationship("Airport", foreign_keys=[origin_airport])
     destination = relationship("Airport", foreign_keys=[destination_airport])
     events = relationship("AirTrackingEvent", back_populates="waybill")
+    house_waybills = relationship("HouseWaybill", back_populates="waybill")
     inspections = relationship("AirCustomsInspection", back_populates="waybill")
     exceptions = relationship("AirException", back_populates="waybill")
+
+
+class HouseWaybill(Base):
+    """
+    House air waybill (HAWB) - one consignment inside a consolidated MAWB.
+
+    Each house bill has its own commodity, customer, value and SLA commitment,
+    so a consolidated master bill can carry multiple consignments with
+    different SLAs (like LCL lines in sea freight).
+    """
+    __tablename__ = "house_waybills"
+
+    id = Column(Integer, primary_key=True, index=True)
+    awb_number = Column(String(15), ForeignKey("air_waybills.awb_number"), nullable=False, index=True)
+    hawb_number = Column(String(15), nullable=False, index=True)  # 分运单号
+    commodity_code = Column(String(20), nullable=True)  # HS code
+    commodity_desc = Column(Text, nullable=False)
+    shipper_name = Column(String(200), nullable=False)
+    consignee_name = Column(String(200), nullable=False)
+    customer_name = Column(String(200), nullable=False)
+    customer_tier = Column(String(20), nullable=False)  # 'VIP', 'high', 'medium', 'low'
+    declared_value_nzd = Column(Float, nullable=False)
+    pieces = Column(Integer, default=1)
+    gross_weight_kg = Column(Float, nullable=False)
+    service_level = Column(String(20), nullable=False)  # 'priority', 'standard', 'economy'
+    sla_tier = Column(String(20), nullable=False)
+    temp_min_c = Column(Float, nullable=True)
+    temp_max_c = Column(Float, nullable=True)
+    scheduled_delivery = Column(DateTime, nullable=True)
+    sla_deadline = Column(DateTime, nullable=True)
+    sla_grace_deadline = Column(DateTime, nullable=True)
+    is_sla_breached = Column(Boolean, default=False)
+    breach_type = Column(String(20), nullable=True)
+    sla_penalty_nzd = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    waybill = relationship("AirWaybill", back_populates="house_waybills")
 
 
 class AirTrackingEvent(Base):
@@ -184,6 +223,7 @@ class AirException(Base):
     id = Column(Integer, primary_key=True, index=True)
     exception_id = Column(String(50), unique=True, nullable=False, index=True)
     awb_number = Column(String(15), ForeignKey("air_waybills.awb_number"), nullable=False, index=True)
+    hawb_id = Column(Integer, ForeignKey("house_waybills.id"), nullable=True, index=True)  # 票级异常归属
     exception_type = Column(String(50), nullable=False)
     # 'delay', 'offload', 'diversion', 'customs_hold', 'damage', 'misroute', 'temp_excursion'
     severity = Column(String(20), nullable=False)  # 'low', 'medium', 'high', 'critical'

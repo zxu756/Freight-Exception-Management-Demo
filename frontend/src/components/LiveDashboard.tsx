@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Ship, Truck, Plane, Pause, Play } from 'lucide-react';
+import { Ship, Truck, Plane, Pause, Play, CloudRain, Route, Globe } from 'lucide-react';
 import { airAPI, roadAPI, seaAPI } from '../services/api';
 import type { TransportLiveData, TransportDashboardData } from '../types';
 
@@ -92,23 +92,41 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
 
       {/* KPI (Kratos Task 12) */}
       {data.kpi && (data.kpi as Record<string, unknown>).total ? (
-        <div className="grid grid-cols-3 gap-px bg-gray-100 border-t border-gray-100">
-          <div className="bg-white px-4 py-2">
+        <div className="grid grid-cols-5 gap-px bg-gray-100 border-t border-gray-100">
+          <div className="bg-white px-2 py-2">
             <p className="text-[10px] text-gray-500">自动处理率</p>
             <p className="text-sm font-semibold text-gray-900">
               {Math.round(((data.kpi as Record<string, unknown>).automation_rate as number) * 100)}%
             </p>
           </div>
-          <div className="bg-white px-4 py-2">
+          <div className="bg-white px-2 py-2">
+            <p className="text-[10px] text-gray-500">准时交付</p>
+            <p className="text-sm font-semibold text-green-600">
+              {(data.kpi as Record<string, unknown>).otd_rate != null
+                ? `${Math.round(((data.kpi as Record<string, unknown>).otd_rate as number) * 100)}%`
+                : '—'}
+            </p>
+          </div>
+          <div className="bg-white px-2 py-2">
+            <p className="text-[10px] text-gray-500">SLA 违约</p>
+            <p className="text-sm font-semibold text-red-600">
+              {(data.kpi as Record<string, unknown>).sla_breach_rate != null
+                ? `${Math.round(((data.kpi as Record<string, unknown>).sla_breach_rate as number) * 100)}%`
+                : '—'}
+            </p>
+          </div>
+          <div className="bg-white px-2 py-2">
+            <p className="text-[10px] text-gray-500">豁免</p>
+            <p className="text-sm font-semibold text-amber-600">
+              {(data.kpi as Record<string, unknown>).excused_rate != null
+                ? `${Math.round(((data.kpi as Record<string, unknown>).excused_rate as number) * 100)}%`
+                : '—'}
+            </p>
+          </div>
+          <div className="bg-white px-2 py-2">
             <p className="text-[10px] text-gray-500">升级率</p>
             <p className="text-sm font-semibold text-gray-900">
               {Math.round(((data.kpi as Record<string, unknown>).escalation_rate as number) * 100)}%
-            </p>
-          </div>
-          <div className="bg-white px-4 py-2">
-            <p className="text-[10px] text-gray-500">SLA 违约率</p>
-            <p className="text-sm font-semibold text-gray-900">
-              {Math.round(((data.kpi as Record<string, unknown>).sla_breach_rate as number) * 100)}%
             </p>
           </div>
         </div>
@@ -249,21 +267,30 @@ const LiveDashboard = () => {
     road: { live: null, dashboard: null, kpi: null },
     sea: { live: null, dashboard: null, kpi: null },
   });
+  const [envEvents, setEnvEvents] = useState<Record<ModeKey, any[]>>({ air: [], road: [], sea: [] });
+  const [segments, setSegments] = useState<any[]>([]);
   const [error, setError] = useState(false);
   const [clock, setClock] = useState('');
+  // 手动触发事件表单
+  const [triggerMode, setTriggerMode] = useState<ModeKey>('road');
+  const [triggerLoc, setTriggerLoc] = useState('AKL');
+  const [triggerType, setTriggerType] = useState('weather');
+  const [triggerSev, setTriggerSev] = useState('severe');
 
   const load = useCallback(async () => {
     try {
-      const [airLive, airDash, airKpi, roadLive, roadDash, roadKpi, seaLive, seaDash, seaKpi] = await Promise.all([
-        airAPI.getLive(), airAPI.getDashboard(), airAPI.getKpi(),
-        roadAPI.getLive(), roadAPI.getDashboard(), roadAPI.getKpi(),
-        seaAPI.getLive(), seaAPI.getDashboard(), seaAPI.getKpi(),
+      const [airLive, airDash, airKpi, airEnv, roadLive, roadDash, roadKpi, roadEnv, roadSeg, seaLive, seaDash, seaKpi, seaEnv] = await Promise.all([
+        airAPI.getLive(), airAPI.getDashboard(), airAPI.getKpi(), airAPI.getEnvEvents(),
+        roadAPI.getLive(), roadAPI.getDashboard(), roadAPI.getKpi(), roadAPI.getEnvEvents(), roadAPI.getSegments(),
+        seaAPI.getLive(), seaAPI.getDashboard(), seaAPI.getKpi(), seaAPI.getEnvEvents(),
       ]);
       setData({
         air: { live: airLive, dashboard: airDash, kpi: airKpi },
         road: { live: roadLive, dashboard: roadDash, kpi: roadKpi },
         sea: { live: seaLive, dashboard: seaDash, kpi: seaKpi },
       });
+      setEnvEvents({ air: airEnv.events ?? [], road: roadEnv.events ?? [], sea: seaEnv.events ?? [] });
+      setSegments(roadSeg.segments ?? []);
       setClock(seaLive.simulator.sim_now);
       setError(false);
     } catch (e) {
@@ -271,6 +298,17 @@ const LiveDashboard = () => {
       console.error('Error loading live data:', e);
     }
   }, []);
+
+  const triggerEvent = async () => {
+    try {
+      await MODES[triggerMode].api.triggerEnvEvent({
+        location: triggerLoc, event_type: triggerType, severity: triggerSev, duration_hours: 12,
+      });
+      load();
+    } catch (e) {
+      console.error('Error triggering event:', e);
+    }
+  };
 
   useEffect(() => {
     load();
@@ -291,6 +329,9 @@ const LiveDashboard = () => {
           </div>
           <div className="flex items-center gap-3">
             {error && <span className="text-xs text-red-600">后端连接失败</span>}
+            <Link to="/world" className="px-3 py-2 text-sm bg-slate-900 text-white rounded-lg hover:bg-slate-700 transition-colors flex items-center gap-1.5 font-medium">
+              <Globe className="w-4 h-4" /> 世界控制台
+            </Link>
             <a href="/" className="px-3 py-2 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors">
               返回案例面板
             </a>
@@ -299,6 +340,90 @@ const LiveDashboard = () => {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* 环境事件横条（实时路况通报 + 手动触发） */}
+        <div className="bg-white rounded-xl border border-gray-200 p-4 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+              <CloudRain className="w-5 h-5 text-blue-600" /> 环境事件 · 实时路况通报
+            </h2>
+            <div className="flex items-center gap-2 text-xs">
+              <select value={triggerMode} onChange={(e) => setTriggerMode(e.target.value as ModeKey)} className="border rounded px-2 py-1">
+                <option value="road">陆运</option>
+                <option value="sea">海运</option>
+                <option value="air">空运</option>
+              </select>
+              <input value={triggerLoc} onChange={(e) => setTriggerLoc(e.target.value)} className="border rounded px-2 py-1 w-20" placeholder="地点" />
+              <select value={triggerType} onChange={(e) => setTriggerType(e.target.value)} className="border rounded px-2 py-1">
+                <option value="weather">暴雨</option>
+                <option value="road_closure">封路</option>
+                <option value="accident">事故</option>
+                <option value="port_congestion">港口拥堵</option>
+                <option value="fog">大雾</option>
+                <option value="snow">积雪</option>
+                <option value="ferry_cancelled">渡轮停航</option>
+              </select>
+              <select value={triggerSev} onChange={(e) => setTriggerSev(e.target.value)} className="border rounded px-2 py-1">
+                <option value="minor">轻微</option>
+                <option value="moderate">中等</option>
+                <option value="severe">严重</option>
+              </select>
+              <button onClick={triggerEvent} className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">触发事件</button>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(Object.keys(envEvents) as ModeKey[]).flatMap((m) =>
+              envEvents[m].map((e: any) => ({ ...e, mode: m }))
+            ).length === 0 && (
+              <span className="text-xs text-gray-400">暂无活跃环境事件</span>
+            )}
+            {(Object.keys(envEvents) as ModeKey[]).flatMap((m) =>
+              envEvents[m].map((e: any) => ({ ...e, mode: m }))
+            ).map((e: any) => (
+              <span key={`${e.mode}-${e.location}-${e.event_type}`} className="inline-flex items-center gap-1.5 text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                <span className="font-medium text-amber-800">{e.mode === 'road' ? '陆' : e.mode === 'sea' ? '海' : '空'} {e.location}</span>
+                <span className="text-gray-600">{e.description}</span>
+                <span className="text-gray-400">({e.severity})</span>
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* 陆运路况 */}
+        {segments.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-4 mb-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+                <Route className="w-5 h-5 text-amber-600" /> 陆运路况
+              </h2>
+              <div className="flex items-center gap-3 text-xs">
+                {(['clear', 'slow', 'congested', 'closed'] as const).map((c) => {
+                  const n = segments.filter((s) => s.condition === c).length;
+                  if (!n) return null;
+                  const color = { clear: 'bg-green-400', slow: 'bg-yellow-400', congested: 'bg-orange-400', closed: 'bg-red-400' }[c];
+                  const label = { clear: '畅通', slow: '缓行', congested: '拥堵', closed: '封闭' }[c];
+                  return (
+                    <span key={c} className="flex items-center gap-1 text-gray-600">
+                      <span className={`w-2 h-2 rounded-full ${color}`} /> {label} {n}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+              {segments.filter((s) => s.condition !== 'clear').map((s) => (
+                <span key={`${s.origin}-${s.destination}`} className="inline-flex items-center gap-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                  <span className={`w-2 h-2 rounded-full ${{ clear: 'bg-green-400', slow: 'bg-yellow-400', congested: 'bg-orange-400', closed: 'bg-red-400' }[s.condition as string]}`} />
+                  <span className="font-medium text-gray-700">{s.origin}→{s.destination}</span>
+                  <span className="text-gray-500">{s.description}</span>
+                </span>
+              ))}
+              {segments.filter((s) => s.condition !== 'clear').length === 0 && (
+                <span className="text-xs text-gray-400">全路段畅通</span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           <TransportPanel mode="sea" data={data.sea} />
           <TransportPanel mode="road" data={data.road} />
