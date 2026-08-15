@@ -265,6 +265,11 @@ class SeaFreightSimulator:
         if visit.vessel_visit_id in self._generated_vessels:
             return
         self._generated_vessels.add(visit.vessel_visit_id)
+        # 暂只做进口（往新西兰走）：出口/沿海航段不生成货物
+        prev_intl = not self._is_nz_port_name(visit.previous_port)
+        next_intl = not self._is_nz_port_name(visit.next_port)
+        if not (prev_intl and not next_intl):
+            return
         # 环境事件驱动船舶延误
         if visit.vessel_status == "EXPECTED":
             now = self.sim_now

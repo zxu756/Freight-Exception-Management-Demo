@@ -653,8 +653,10 @@ class AirCargoSimulator:
             pool = DOMESTIC_COMMODITIES
             route_type = "domestic"
         else:
-            exporting = org in {"AKL", "CHC", "WLG", "ZQN"}
-            pool = EXPORT_COMMODITIES if exporting else IMPORT_COMMODITIES
+            # 暂只做进口（国际 → 新西兰）：出口航段（NZ → 国际）不生成运单
+            if org in {"AKL", "CHC", "WLG", "ZQN"}:
+                return None
+            pool = IMPORT_COMMODITIES
             route_type = "international"
 
         # 集运（consolidation）：~40% 的国际运单装多票分运单（HAWB），各票独立货主/货值/SLA
