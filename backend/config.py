@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     debug: bool = True
 
+    # 全局订单量缩放：目标 ~18000 票级订单/月（海陆空合计 ~600/天）
+    order_scale: float = 0.066
+    # 异常注入缩放：目标异常率 8%-12%（最多不超过 12%）
+    exception_scale: float = 1.8
+
     # Database
     database_url: str = "sqlite:///./freight_demo.db"
 

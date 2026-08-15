@@ -380,7 +380,7 @@ class AirCargoSimulator:
         routes = DOMESTIC_ROUTES + INTL_ROUTES
         for org, dst, freq, airline, ac, freight in routes:
             key = (org, dst, airline)
-            interval = 1440.0 / freq
+            interval = 1440.0 / (freq * settings.order_scale)
             first = self.sim_now - timedelta(hours=6)
             self._route_next_dep[key] = first + timedelta(minutes=random.uniform(0, interval))
 
@@ -390,7 +390,7 @@ class AirCargoSimulator:
             org, dst, airline = key
             freq = next(r[2] for r in DOMESTIC_ROUTES + INTL_ROUTES
                         if r[0] == org and r[1] == dst and r[3] == airline)
-            interval = 1440.0 / freq
+            interval = 1440.0 / (freq * settings.order_scale)
             while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
                 if not self._flight_conflicts(org, dst, airline, self._route_next_dep[key]):
                     self._create_flight(org, dst, airline, dep=self._route_next_dep[key])
@@ -540,7 +540,7 @@ class AirCargoSimulator:
         routes = DOMESTIC_ROUTES + INTL_ROUTES
         for org, dst, freq, airline, ac, freight in routes:
             key = (org, dst, airline)
-            interval = 1440.0 / freq
+            interval = 1440.0 / (freq * settings.order_scale)
             while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
                 if not self._flight_conflicts(org, dst, airline, self._route_next_dep[key]):
                     self._create_flight(org, dst, airline, dep=self._route_next_dep[key])
@@ -588,7 +588,7 @@ class AirCargoSimulator:
                 event = random.choice(events)
                 delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
                 delay_reason = EVENT_TYPE_TO_REASON.get(event["event_type"], "weather")
-            elif random.random() < 0.03:
+            elif random.random() < 0.03 * settings.exception_scale:
                 delay_minutes = int(random.choice([15, 20, 25, 30, 35, 40, 45, 55, 60, 75, 90, 120]))
                 delay_reason = random.choice(["technical", "crew", "security"])
 
@@ -785,11 +785,11 @@ class AirCargoSimulator:
                        (awb, "MNF", "Manifest submitted to customs", dst, None, None, eff_arr + timedelta(minutes=20)))
             self._push(eff_arr + timedelta(hours=2), "customs_clear",
                        (awb, eff_arr + timedelta(hours=2), eff_arr + timedelta(hours=3)))
-            if random.random() < 0.05 and self._is_food_cargo(waybill):
+            if random.random() < 0.05 * settings.exception_scale and self._is_food_cargo(waybill):
                 self._push(eff_arr + timedelta(minutes=20), "customs_hold", awb)
-            if waybill.temp_min_c is not None and random.random() < 0.012:
+            if waybill.temp_min_c is not None and random.random() < 0.012 * settings.exception_scale:
                 self._push(eff_arr, "temp_alert", awb)
-        self._push(eff_arr + timedelta(hours=3 if is_domestic else 6), "dlv", awb)
+        self._push(eff_arr + timedelta(hours=3 if is_domestic else 6), "dlv", (awb, eff_arr + timedelta(hours=3 if is_domestic else 6)))
 
         # 货物丢失/失踪 (~0.5%)
         if random.random() < 0.005:
@@ -897,7 +897,7 @@ class AirCargoSimulator:
                 create_road_drayage(db, "air", w.awb_number, w.destination_airport,
                                     w.commodity_desc, w.customer_name, w.customer_tier,
                                     w.declared_value_nzd, w.gross_weight_kg, eff_arr)
-            if w.route_type == "international" and random.random() < 0.004:
+            if w.route_type == "international" and random.random() < 0.004 * settings.exception_scale:
                 self._create_exception(db, w, "misroute",
                                        f"Cargo offloaded at incorrect destination during {flight.flight_number} arrival",
                                        delay_hours=12.0,
@@ -1036,7 +1036,8 @@ class AirCargoSimulator:
             recovery=["redelivery", "reschedule"]
         )
 
-    def _on_dlv(self, db, awb):
+    def _on_dlv(self, db, payload):
+        awb, ts = payload
         w = db.query(AirWaybill).filter(AirWaybill.awb_number == awb).first()
         if not w:
             return
@@ -1049,7 +1050,7 @@ class AirCargoSimulator:
             return
         w.current_status = "DLV"
         w.current_location = w.destination_airport
-        w.delivered_at = self.sim_now
+        w.delivered_at = ts or self.sim_now
         self._insert_event(db, awb, "DLV", "Delivered to consignee", w.destination_airport)
         # SLA 违约判定
         policy = get_policy("air", w.service_level or "standard")

@@ -263,7 +263,7 @@ class RoadFreightSimulator:
     def _init_route_schedule(self):
         for org, dst, freq, carrier, vt in ROAD_ROUTES:
             key = (org, dst, carrier)
-            interval = 1440.0 / freq
+            interval = 1440.0 / (freq * settings.order_scale)
             first = self.sim_now - timedelta(hours=6)
             self._route_next_dep[key] = first + timedelta(minutes=random.uniform(0, interval))
 
@@ -272,7 +272,7 @@ class RoadFreightSimulator:
         for key in list(self._route_next_dep.keys()):
             org, dst, carrier = key
             freq = next(r[2] for r in ROAD_ROUTES if r[0] == org and r[1] == dst and r[3] == carrier)
-            interval = 1440.0 / freq
+            interval = 1440.0 / (freq * settings.order_scale)
             while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
                 if not self._trip_conflicts(org, dst, carrier, self._route_next_dep[key]):
                     self._create_trip(org, dst, carrier, dep=self._route_next_dep[key])
@@ -429,7 +429,7 @@ class RoadFreightSimulator:
     def _spawn_due_trips(self):
         for org, dst, freq, carrier, vt in ROAD_ROUTES:
             key = (org, dst, carrier)
-            interval = 1440.0 / freq
+            interval = 1440.0 / (freq * settings.order_scale)
             while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
                 if not self._trip_conflicts(org, dst, carrier, self._route_next_dep[key]):
                     self._create_trip(org, dst, carrier, dep=self._route_next_dep[key])
@@ -477,10 +477,10 @@ class RoadFreightSimulator:
                 event = random.choice(events)
                 delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
                 delay_reason = EVENT_TYPE_TO_REASON.get(event["event_type"], "weather")
-            elif is_inter_island and random.random() < 0.05:
+            elif is_inter_island and random.random() < 0.05 * settings.exception_scale:
                 delay_minutes = int(random.choice([180, 240, 300, 360, 420, 540, 720]))
                 delay_reason = "ferry"
-            elif random.random() < 0.03:
+            elif random.random() < 0.03 * settings.exception_scale:
                 delay_minutes = int(random.choice([15, 20, 30, 40, 45, 60, 90, 120]))
                 delay_reason = random.choice(["breakdown", "driver_hours"])
 
@@ -569,7 +569,7 @@ class RoadFreightSimulator:
             elif _tier == "VIP" and random.random() < 0.7:
                 _tier = "high"
             _svc = random.choices(["priority", "standard", "economy"], weights=[0.18, 0.62, 0.2])[0]
-            _sla_h = max(6.0, round(dur_hours * random.choice([0.9, 1.1, 1.3, 1.5]), 1))
+            _sla_h = max(8.0, round((dur_hours + 2.0) * random.choice([1.3, 1.6, 2.0, 2.5]), 1))
             if _svc == "priority":
                 _sla_h = max(4.0, _sla_h * 0.6)
             lines_meta.append({
@@ -669,9 +669,9 @@ class RoadFreightSimulator:
             self._push(ferry_ts, "event", (cn, "FERRY", "Cook Strait ferry crossing",
                                            "WLG" if org in NORTH_ISLAND else "PIC", None, None, ferry_ts))
 
-        self._push(eff_arr + timedelta(hours=2), "pod", cn)
+        self._push(eff_arr + timedelta(hours=2), "pod", (cn, eff_arr + timedelta(hours=2)))
 
-        if cons.temp_min_c is not None and random.random() < 0.03:
+        if cons.temp_min_c is not None and random.random() < 0.03 * settings.exception_scale:
             self._push(eff_dep + (eff_arr - eff_dep) * random.uniform(0.3, 0.8), "temp_alert", cn)
 
         # 货物丢失/失踪 (~0.5%)
@@ -883,7 +883,8 @@ class RoadFreightSimulator:
             ["redelivery", "reschedule"]
         )
 
-    def _on_pod(self, db, cn):
+    def _on_pod(self, db, payload):
+        cn, ts = payload
         c = db.query(RoadConsignment).filter(RoadConsignment.consignment_number == cn).first()
         if not c:
             return
@@ -896,7 +897,7 @@ class RoadFreightSimulator:
             return
         c.current_status = "POD"
         c.current_location = c.destination_depot
-        c.delivered_at = self.sim_now
+        c.delivered_at = ts or self.sim_now
         self._insert_event(db, cn, "POD", "Proof of delivery signed", c.destination_depot)
         self._finalize_pod(db, c)
 

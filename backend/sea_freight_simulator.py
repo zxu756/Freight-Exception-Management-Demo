@@ -84,6 +84,7 @@ class SeaFreightSimulator:
         self._last_cleanup_sim = self.sim_now
         self._last_missing_check_sim = self.sim_now
         self._last_env_event_sim = self.sim_now
+        self._last_container_gen_sim = self.sim_now
         self._active_events = {}  # location -> [EnvironmentEvent]
         self._generated_vessels = set()
         self._loaded_vessels = False
@@ -274,13 +275,13 @@ class SeaFreightSimulator:
                 delay_minutes = random.randint(*SEVERITY_DELAY_MINUTES[event["severity"]])
                 visit.delay_minutes = delay_minutes
                 visit.delay_reason_code = EVENT_TYPE_TO_REASON.get(event["event_type"], "port_congestion")
-            elif random.random() < 0.03:
+            elif random.random() < 0.03 * settings.exception_scale:
                 delay_minutes = int(random.choice([120, 180, 240, 360, 480]))
                 visit.delay_minutes = delay_minutes
                 visit.delay_reason_code = random.choice(["berth_unavailable", "labour", "mechanical"])
             if visit.delay_minutes and visit.departure_datetime:
                 visit.departure_datetime += timedelta(minutes=visit.delay_minutes)
-        n = random.randint(20, 60)
+        n = max(1, int(random.randint(20, 60) * settings.order_scale))
         for _ in range(n):
             self._create_container(db, visit)
         db.commit()
@@ -344,7 +345,8 @@ class SeaFreightSimulator:
 
         arrival = visit.arrival_datetime or self.sim_now
         is_dg = "DGR" in desc
-        sla_deadline = arrival + timedelta(hours=policy["transit_hours"])
+        # SLA 截止给 30%-80% 缓冲（否则与 scheduled_delivery 相同，任何延误都违约）
+        sla_deadline = arrival + timedelta(hours=policy["transit_hours"] * random.choice([1.3, 1.5, 1.8]))
         container = SeaContainer(
             container_number=cn, vessel_visit_id=visit.vessel_visit_id,
             direction=direction, size=size, container_type=ctype,
@@ -367,7 +369,7 @@ class SeaFreightSimulator:
         # 票级货物行（LCL 多票 / FCL 单票），每票独立 SLA
         for i, lm in enumerate(lines_meta):
             _lp = get_policy("sea", lm["svc"])
-            _dl = arrival + timedelta(hours=_lp["transit_hours"])
+            _dl = arrival + timedelta(hours=_lp["transit_hours"] * random.choice([1.3, 1.5, 1.8]))
             _ltmin, _ltmax = (lm["temp"][0], lm["temp"][1]) if lm["temp"] else (None, None)
             db.add(CargoLine(
                 container_number=cn, line_number=i + 1,
@@ -433,7 +435,7 @@ class SeaFreightSimulator:
         self._push(gate_out, "gate_out", (cn, port))
 
         delivered = gate_out + timedelta(hours=random.randint(*deliv_h))
-        self._push(delivered, "deliver", (cn, port))
+        self._push(delivered, "deliver", (cn, port, delivered))
 
         # 海关扣留 (进口，~12%)
         if container.direction == "import" and random.random() < 0.12:
@@ -445,7 +447,7 @@ class SeaFreightSimulator:
             self._push(dis + timedelta(hours=random.randint(4, 16)), "biosecurity_hold", (cn, port))
 
         # 冷藏温度异常 (~1.5%)
-        if container.temp_min_c is not None and random.random() < 0.015:
+        if container.temp_min_c is not None and random.random() < 0.015 * settings.exception_scale:
             self._push(dis + timedelta(hours=random.randint(1, 6)), "temp_alert", (cn, port))
 
         # 货损 (~1%)
@@ -561,7 +563,7 @@ class SeaFreightSimulator:
         self._insert_event(db, cn, "GTO", "Container gate out", port)
 
     def _on_deliver(self, db, payload):
-        cn, port = payload
+        cn, port, ts = payload
         c = db.query(SeaContainer).filter(SeaContainer.container_number == cn).first()
         if not c:
             return
@@ -573,7 +575,7 @@ class SeaFreightSimulator:
         if dup:
             return
         c.current_status = "delivered"
-        c.delivered_at = self.sim_now
+        c.delivered_at = ts or self.sim_now
         self._insert_event(db, cn, "DLV", "Container delivered", port)
         if c.available_at:
             dwell = (c.delivered_at - c.available_at).total_seconds() / 3600
@@ -868,6 +870,10 @@ class SeaFreightSimulator:
                     self._generate_env_events(db)
                     self._cleanup_env_events(db)
                     self._last_env_event_sim = self.sim_now
+                # 持续生成：新进入活跃窗口的船期生成集装箱（_generated_vessels 防重）
+                if (self.sim_now - self._last_container_gen_sim) > timedelta(hours=6):
+                    self._backfill(db)
+                    self._last_container_gen_sim = self.sim_now
                 if (self.sim_now - self._last_missing_check_sim) > timedelta(hours=2):
                     self._run_missing_event_detection(db)
                     self._last_missing_check_sim = self.sim_now
