@@ -483,6 +483,13 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
         "actual_recovery_hours": exc.actual_recovery_hours,
         "resolved_at": exc.resolved_at.isoformat() if exc.resolved_at else None,
         "decisions": _decisions,
+        "disposition": exc.disposition,
+        "disposition_note": exc.disposition_note,
+        "disposition_by": exc.disposition_by,
+        "disposition_at": exc.disposition_at.isoformat() if exc.disposition_at else None,
+        "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
+        "close_evidence": exc.close_evidence,
+        "reopen_count": exc.reopen_count,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "awb_number": waybill.awb_number if waybill else exc.awb_number,
@@ -548,6 +555,58 @@ async def decide_air_exception(exception_id: str, body: dict, db: Session = Depe
     }
 
 
+@router.post("/air/exceptions/{exception_id}/disposition")
+async def disposition_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """人工确认/标记误报/重复/数据问题（EVT-006）。"""
+    from exception_ops import set_disposition
+    from world.clock import world_clock
+    try:
+        exc = set_disposition(db, "air", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "disposition": exc.disposition}
+
+
+@router.post("/air/exceptions/{exception_id}/close")
+async def close_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """人工结案（MON-005）。"""
+    from exception_ops import close_exception
+    from world.clock import world_clock
+    try:
+        exc = close_exception(db, "air", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "closed_at": exc.closed_at.isoformat() if exc.closed_at else None}
+
+
+@router.post("/air/exceptions/{exception_id}/reopen")
+async def reopen_air_exception(exception_id: str, db: Session = Depends(get_db)):
+    """重新打开案件。"""
+    from exception_ops import reopen_exception
+    from world.clock import world_clock
+    try:
+        exc = reopen_exception(db, "air", exception_id, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "reopen_count": exc.reopen_count}
+
+
+@router.post("/air/exceptions")
+async def create_air_exception(body: dict, db: Session = Depends(get_db)):
+    """人工创建异常（EVT-006）。"""
+    from exception_ops import create_manual_exception
+    from world.clock import world_clock
+    try:
+        exc_type, reference = create_manual_exception(db, "air", body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "exception_type": exc_type, "reference": reference,
+            "message": "manual exception created and customer notified"}
+
+
 @router.get("/air/dashboard")
 async def get_air_dashboard(db: Session = Depends(get_db)):
     """
@@ -564,7 +623,7 @@ async def get_air_dashboard(db: Session = Depends(get_db)):
     active_flights = db.query(AirFlight).filter(AirFlight.status.in_(["scheduled", "departed", "delayed"])).count()
     delayed_flights = db.query(AirFlight).filter(AirFlight.status == "delayed").count()
 
-    open_exceptions = db.query(AirException).filter(AirException.status != "resolved").count()
+    open_exceptions = db.query(AirException).filter(AirException.status.notin_(["resolved", "closed"])).count()
     high_risk = db.query(AirException).filter(AirException.risk_level == "high").count()
     pending_approval = db.query(AirException).filter(AirException.status == "pending_approval").count()
 
@@ -710,7 +769,7 @@ async def get_air_live(db: Session = Depends(get_db)):
     ).order_by(AirFlight.delay_minutes.desc()).limit(10).all()
 
     open_exceptions = db.query(AirException).filter(
-        AirException.status != "resolved"
+        AirException.status.notin_(["resolved", "closed"])
     ).order_by(AirException.risk_score.desc()).limit(10).all()
 
     return {

@@ -15,6 +15,7 @@ import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.m
 import notification_models  # noqa: F401  # Register customer notification table
 import customer_models  # noqa: F401  # Register customer master data table
 import decision_models  # noqa: F401  # Register coordinator decision tables
+import quote_models  # noqa: F401  # Register carrier quote table
 import world.maintenance  # noqa: F401  # Register carrier performance + metric snapshot tables
 import sla_models  # noqa: F401  # Register SLA policy table
 import environment_models  # noqa: F401  # Register environmental event table
@@ -138,7 +139,7 @@ def _migrate_ml_fields():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN sla_penalty_nzd FLOAT"))
 
     # Scenario 4 P0/P1 columns on exception tables (trigger link / latency / actual outcome)
-    for table in ["air_exceptions", "road_exceptions", "sea_exceptions"]:
+    for table in ["air_exceptions", "road_exceptions", "sea_exceptions", "rail_exceptions"]:
         if table not in insp.get_table_names():
             continue
         cols = {c["name"] for c in insp.get_columns(table)}
@@ -153,6 +154,13 @@ def _migrate_ml_fields():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN actual_cost FLOAT"))
             if "actual_recovery_hours" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN actual_recovery_hours FLOAT"))
+            # EVT-006 / MON-005: disposition + close/reopen columns
+            for _col, _ddl in (("disposition", "VARCHAR(20)"), ("disposition_note", "TEXT"),
+                               ("disposition_by", "VARCHAR(100)"), ("disposition_at", "DATETIME"),
+                               ("closed_at", "DATETIME"), ("close_evidence", "TEXT"),
+                               ("reopen_count", "INTEGER DEFAULT 0")):
+                if _col not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {_col} {_ddl}"))
 
     # Notification outbox columns (real delivery status)
     if "exception_notifications" in insp.get_table_names():
@@ -164,6 +172,14 @@ def _migrate_ml_fields():
                 conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN external_message_id VARCHAR(100)"))
             if "sent_real_at" not in cols:
                 conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN sent_real_at DATETIME"))
+            if "review_status" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN review_status VARCHAR(20) DEFAULT 'approved'"))
+            if "reviewed_by" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN reviewed_by VARCHAR(100)"))
+            if "reviewed_at" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN reviewed_at DATETIME"))
+            if "edited_message" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN edited_message TEXT"))
 
 
 @asynccontextmanager

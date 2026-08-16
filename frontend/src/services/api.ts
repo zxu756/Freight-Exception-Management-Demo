@@ -55,6 +55,18 @@ export const airAPI = {
     const response = await api.post(`/air/exceptions/${exceptionId}/decision`, body);
     return response.data;
   },
+  dispositionException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/air/exceptions/${exceptionId}/disposition`, body);
+    return response.data;
+  },
+  closeException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/air/exceptions/${exceptionId}/close`, body);
+    return response.data;
+  },
+  reopenException: async (exceptionId: string) => {
+    const response = await api.post(`/air/exceptions/${exceptionId}/reopen`, {});
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/air/sim/control', { action, speed });
     return response.data;
@@ -96,6 +108,18 @@ export const roadAPI = {
   },
   decideException: async (exceptionId: string, body: Record<string, unknown>) => {
     const response = await api.post(`/road/exceptions/${exceptionId}/decision`, body);
+    return response.data;
+  },
+  dispositionException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/road/exceptions/${exceptionId}/disposition`, body);
+    return response.data;
+  },
+  closeException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/road/exceptions/${exceptionId}/close`, body);
+    return response.data;
+  },
+  reopenException: async (exceptionId: string) => {
+    const response = await api.post(`/road/exceptions/${exceptionId}/reopen`, {});
     return response.data;
   },
   control: async (action: string, speed?: number) => {
@@ -141,6 +165,18 @@ export const railAPI = {
     const response = await api.post(`/rail/exceptions/${exceptionId}/decision`, body);
     return response.data;
   },
+  dispositionException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/rail/exceptions/${exceptionId}/disposition`, body);
+    return response.data;
+  },
+  closeException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/rail/exceptions/${exceptionId}/close`, body);
+    return response.data;
+  },
+  reopenException: async (exceptionId: string) => {
+    const response = await api.post(`/rail/exceptions/${exceptionId}/reopen`, {});
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/rail/sim/control', { action, speed });
     return response.data;
@@ -180,6 +216,18 @@ export const seaAPI = {
     const response = await api.post(`/sea/exceptions/${exceptionId}/decision`, body);
     return response.data;
   },
+  dispositionException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/sea/exceptions/${exceptionId}/disposition`, body);
+    return response.data;
+  },
+  closeException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/sea/exceptions/${exceptionId}/close`, body);
+    return response.data;
+  },
+  reopenException: async (exceptionId: string) => {
+    const response = await api.post(`/sea/exceptions/${exceptionId}/reopen`, {});
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/sea/sim/control', { action, speed });
     return response.data;
@@ -203,6 +251,11 @@ export const worldAPI = {
   getCustomerContacts: async (limit = 50) => (await api.get('/world/customer-contacts', { params: { limit } })).data,
   recordCustomerContact: async (body: Record<string, unknown>) => (await api.post('/world/customer-contacts', body)).data,
   markNotificationDelivered: async (notificationId: string, body: Record<string, unknown>) => (await api.post(`/notifications/${notificationId}/delivery`, body)).data,
+  getNotifications: async (reviewStatus?: string) => (await api.get('/world/notifications', { params: reviewStatus ? { review_status: reviewStatus } : {} })).data,
+  reviewNotification: async (notificationId: string, body: Record<string, unknown>) => (await api.post(`/notifications/${notificationId}/review`, body)).data,
+  getQuotes: async (exceptionId?: string) => (await api.get('/world/quotes', { params: exceptionId ? { exception_id: exceptionId } : {} })).data,
+  createQuote: async (body: Record<string, unknown>) => (await api.post('/world/quotes', body)).data,
+  selectQuote: async (quoteId: string) => (await api.post(`/world/quotes/${quoteId}/select`, {})).data,
 };
 
 export default api;

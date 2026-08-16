@@ -410,6 +410,13 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
         "actual_recovery_hours": exc.actual_recovery_hours,
         "resolved_at": exc.resolved_at.isoformat() if exc.resolved_at else None,
         "decisions": _decisions,
+        "disposition": exc.disposition,
+        "disposition_note": exc.disposition_note,
+        "disposition_by": exc.disposition_by,
+        "disposition_at": exc.disposition_at.isoformat() if exc.disposition_at else None,
+        "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
+        "close_evidence": exc.close_evidence,
+        "reopen_count": exc.reopen_count,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "container_number": container.container_number if container else exc.container_number,
@@ -476,6 +483,58 @@ async def decide_sea_exception(exception_id: str, body: dict, db: Session = Depe
     }
 
 
+@router.post("/sea/exceptions/{exception_id}/disposition")
+async def disposition_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """人工确认/标记误报/重复/数据问题（EVT-006）：body={disposition: confirmed|false_positive|duplicate|data_issue, note, by}。"""
+    from exception_ops import set_disposition
+    from world.clock import world_clock
+    try:
+        exc = set_disposition(db, "sea", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "disposition": exc.disposition}
+
+
+@router.post("/sea/exceptions/{exception_id}/close")
+async def close_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """人工结案（MON-005）：body={evidence, note}。"""
+    from exception_ops import close_exception
+    from world.clock import world_clock
+    try:
+        exc = close_exception(db, "sea", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "closed_at": exc.closed_at.isoformat() if exc.closed_at else None}
+
+
+@router.post("/sea/exceptions/{exception_id}/reopen")
+async def reopen_sea_exception(exception_id: str, db: Session = Depends(get_db)):
+    """重新打开案件（二次异常，MON-005）。"""
+    from exception_ops import reopen_exception
+    from world.clock import world_clock
+    try:
+        exc = reopen_exception(db, "sea", exception_id, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "reopen_count": exc.reopen_count}
+
+
+@router.post("/sea/exceptions")
+async def create_sea_exception(body: dict, db: Session = Depends(get_db)):
+    """人工创建异常（EVT-006）：body={reference, exception_type, root_cause, diagnosis, note}。"""
+    from exception_ops import create_manual_exception
+    from world.clock import world_clock
+    try:
+        exc_type, reference = create_manual_exception(db, "sea", body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "exception_type": exc_type, "reference": reference,
+            "message": "manual exception created and customer notified"}
+
+
 @router.get("/sea/dashboard")
 async def get_sea_dashboard(db: Session = Depends(get_db)):
     """Get sea freight operations dashboard summary."""
@@ -486,7 +545,7 @@ async def get_sea_dashboard(db: Session = Depends(get_db)):
     expected_vessels = db.query(VesselVisit).filter(VesselVisit.vessel_status == "EXPECTED").count()
     in_port = db.query(VesselVisit).filter(VesselVisit.vessel_status == "INPORT").count()
 
-    open_exceptions = db.query(SeaException).filter(SeaException.status != "resolved").count()
+    open_exceptions = db.query(SeaException).filter(SeaException.status.notin_(["resolved", "closed"])).count()
     high_risk = db.query(SeaException).filter(SeaException.risk_level == "high").count()
     pending_approval = db.query(SeaException).filter(SeaException.status == "pending_approval").count()
 
@@ -615,7 +674,7 @@ async def get_sea_live(db: Session = Depends(get_db)):
     ).limit(20).all()
 
     open_exceptions = db.query(SeaException).filter(
-        SeaException.status != "resolved"
+        SeaException.status.notin_(["resolved", "closed"])
     ).order_by(SeaException.risk_score.desc()).limit(10).all()
 
     return {

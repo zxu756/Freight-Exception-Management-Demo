@@ -204,6 +204,14 @@ class RailException(Base):
     actual_action = Column(String(50), nullable=True)
     actual_cost = Column(Float, nullable=True)
     actual_recovery_hours = Column(Float, nullable=True)
+    # EVT-006 / MON-005：处置与结案（误报/重复/关闭/重开）
+    disposition = Column(String(20), nullable=True)  # confirmed/false_positive/duplicate/data_issue
+    disposition_note = Column(Text, nullable=True)
+    disposition_by = Column(String(100), nullable=True)
+    disposition_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    close_evidence = Column(Text, nullable=True)
+    reopen_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     consignment = relationship("RailConsignment", back_populates="exceptions")

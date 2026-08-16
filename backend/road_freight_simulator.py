@@ -1068,6 +1068,8 @@ class RoadFreightSimulator:
             recipient_email=contact.get("email"),
             recipient_phone=contact.get("phone") or contact.get("mobile"),
             channel=channel,
+            # COM-003：高风险异常的通知必须人工审核后才外发
+            review_status=("pending_review" if exc.risk_level == "high" else "approved"),
             message=msg,
             revised_eta=revised_eta,
             confidence=confidence,

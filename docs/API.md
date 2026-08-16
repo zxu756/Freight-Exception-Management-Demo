@@ -882,3 +882,37 @@ risky_only=true 只返回准点率 ≤70% 且样本 ≥3 的高风险承运人�
 - 检测延迟 detection_latency_minutes 仅在触发事件 24h 内记录（>24h 视为无法判定，置空），指标快照只统计 0-1440 分钟区间。
 
 *本文档与代码同仓库维护（docs/API.md）。*
+---
+
+## 14. 人工处置 / 通知审核 / 承运商报价（EVT-006 · COM-003 · QTE-001 · MON-005）
+
+### 14.1 异常处置（误报/重复/数据问题/结案/重开）
+
+| 方法 & 路径 | 说明 |
+| --- | --- |
+| POST /api/{mode}/exceptions/{id}/disposition | body={disposition: confirmed\|false_positive\|duplicate\|data_issue, note, by}；案件置为 closed 并记录处置人/备注 |
+| POST /api/{mode}/exceptions/{id}/close | 人工结案，body={evidence}（POD/交付/海关放行等客观证据） |
+| POST /api/{mode}/exceptions/{id}/reopen | 重新打开（二次异常），reopen_count+1，原时间线保留 |
+| POST /api/{mode}/exceptions | 人工创建异常，body={reference, exception_type, root_cause, diagnosis}；绑定现有装载单元，走完整风险/分类/方案/通知流程 |
+
+异常详情新增字段：disposition / disposition_note / disposition_by / disposition_at / closed_at / close_evidence / reopen_count。
+开放异常统计（dashboard/live）已把 closed 排除；kpi 不受影响。
+
+### 14.2 通知人工审核（COM-003）
+
+高风险异常（risk_level=high）生成的通知 review_status=pending_review，必须人工确认后才能外发。
+
+| 方法 & 路径 | 说明 |
+| --- | --- |
+| GET /api/world/notifications?review_status=pending_review | 跨模式待审通知队列 |
+| POST /api/notifications/{id}/review | body={action: approve\|edit\|reject, message?, reviewed_by}；edit 会把新文案写入 edited_message 并置为 approved，reject 置为 rejected |
+
+### 14.3 承运商报价（QTE-001/002）
+
+| 方法 & 路径 | 说明 |
+| --- | --- |
+| GET /api/world/quotes?exception_id= | 某异常的全部报价（含版本/状态） |
+| POST /api/world/quotes | 人工录入：body={mode, exception_id, carrier, price_nzd, service, new_eta, surcharges_nzd, capacity_note, note}；同一异常重复录入版本自动 +1 |
+| POST /api/world/quotes/{quote_id}/select | 选择报价（其余同异常报价自动置为 rejected） |
+
+*本文档与代码同仓库维护（docs/API.md）。*

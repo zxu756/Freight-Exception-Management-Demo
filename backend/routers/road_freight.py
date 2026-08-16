@@ -440,6 +440,13 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
         "actual_recovery_hours": exc.actual_recovery_hours,
         "resolved_at": exc.resolved_at.isoformat() if exc.resolved_at else None,
         "decisions": _decisions,
+        "disposition": exc.disposition,
+        "disposition_note": exc.disposition_note,
+        "disposition_by": exc.disposition_by,
+        "disposition_at": exc.disposition_at.isoformat() if exc.disposition_at else None,
+        "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
+        "close_evidence": exc.close_evidence,
+        "reopen_count": exc.reopen_count,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "consignment_number": cons.consignment_number if cons else exc.consignment_number,
@@ -505,6 +512,58 @@ async def decide_road_exception(exception_id: str, body: dict, db: Session = Dep
     }
 
 
+@router.post("/road/exceptions/{exception_id}/disposition")
+async def disposition_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """人工确认/标记误报/重复/数据问题（EVT-006）。"""
+    from exception_ops import set_disposition
+    from world.clock import world_clock
+    try:
+        exc = set_disposition(db, "road", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "disposition": exc.disposition}
+
+
+@router.post("/road/exceptions/{exception_id}/close")
+async def close_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """人工结案（MON-005）。"""
+    from exception_ops import close_exception
+    from world.clock import world_clock
+    try:
+        exc = close_exception(db, "road", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "closed_at": exc.closed_at.isoformat() if exc.closed_at else None}
+
+
+@router.post("/road/exceptions/{exception_id}/reopen")
+async def reopen_road_exception(exception_id: str, db: Session = Depends(get_db)):
+    """重新打开案件。"""
+    from exception_ops import reopen_exception
+    from world.clock import world_clock
+    try:
+        exc = reopen_exception(db, "road", exception_id, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "status": exc.status,
+            "reopen_count": exc.reopen_count}
+
+
+@router.post("/road/exceptions")
+async def create_road_exception(body: dict, db: Session = Depends(get_db)):
+    """人工创建异常（EVT-006）。"""
+    from exception_ops import create_manual_exception
+    from world.clock import world_clock
+    try:
+        exc_type, reference = create_manual_exception(db, "road", body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "exception_type": exc_type, "reference": reference,
+            "message": "manual exception created and customer notified"}
+
+
 @router.get("/road/dashboard")
 async def get_road_dashboard(db: Session = Depends(get_db)):
     """Get road freight operations dashboard summary."""
@@ -516,7 +575,7 @@ async def get_road_dashboard(db: Session = Depends(get_db)):
     active_trips = db.query(RoadTrip).filter(RoadTrip.status.in_(["scheduled", "loading", "in_transit", "delayed"])).count()
     delayed_trips = db.query(RoadTrip).filter(RoadTrip.status == "delayed").count()
 
-    open_exceptions = db.query(RoadException).filter(RoadException.status != "resolved").count()
+    open_exceptions = db.query(RoadException).filter(RoadException.status.notin_(["resolved", "closed"])).count()
     high_risk = db.query(RoadException).filter(RoadException.risk_level == "high").count()
     pending_approval = db.query(RoadException).filter(RoadException.status == "pending_approval").count()
 
@@ -652,7 +711,7 @@ async def get_road_live(db: Session = Depends(get_db)):
     ).order_by(RoadTrip.delay_minutes.desc()).limit(10).all()
 
     open_exceptions = db.query(RoadException).filter(
-        RoadException.status != "resolved"
+        RoadException.status.notin_(["resolved", "closed"])
     ).order_by(RoadException.risk_score.desc()).limit(10).all()
 
     return {

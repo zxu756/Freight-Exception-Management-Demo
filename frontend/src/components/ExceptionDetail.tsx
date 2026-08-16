@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Search, Brain, MousePointerClick, Scale, Package, Bell } from 'lucide-react';
-import { airAPI, roadAPI, seaAPI, railAPI } from '../services/api';
+import { airAPI, roadAPI, seaAPI, railAPI, worldAPI } from '../services/api';
 
 const APIS: Record<string, typeof airAPI> = { sea: seaAPI, road: roadAPI, air: airAPI, rail: railAPI };
 
@@ -19,6 +19,9 @@ const statusLabel: Record<string, string> = {
   pending_approval: '待人工审批',
   escalated: '已升级',
   detected: '已检测',
+  resolved: '已解决',
+  closed: '已关闭',
+  reopened: '已重开',
 };
 
 function Step({ n, icon: Icon, title, subtitle, children }: { n: number; icon: any; title: string; subtitle: string; children: React.ReactNode }) {
@@ -59,6 +62,14 @@ const ExceptionDetail = () => {
   const [note, setNote] = useState('');
   const [deciding, setDeciding] = useState(false);
   const [decisionMsg, setDecisionMsg] = useState('');
+  const [dispMode, setDispMode] = useState('confirmed');
+  const [dispNote, setDispNote] = useState('');
+  const [quotes, setQuotes] = useState<any[]>([]);
+  const [qCarrier, setQCarrier] = useState('');
+  const [qPrice, setQPrice] = useState('');
+  const [qEta, setQEta] = useState('');
+  const [qNote, setQNote] = useState('');
+  const [opMsg, setOpMsg] = useState('');
 
   const reload = useCallback(() => {
     const api = APIS[mode ?? ''];
@@ -69,6 +80,17 @@ const ExceptionDetail = () => {
   }, [mode, exceptionId]);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // 报价（QTE）
+  useEffect(() => {
+    if (!data) return;
+    worldAPI.getQuotes(data.exception_id).then((d) => setQuotes(d.quotes ?? [])).catch(() => setQuotes([]));
+  }, [data]);
+
+  const runOp = async (fn: () => Promise<unknown>, msg: string) => {
+    try { await fn(); setOpMsg(msg); await reload(); }
+    catch { setOpMsg('操作失败'); }
+  };
 
   const submitDecision = async () => {
     const api = APIS[mode ?? ''];
@@ -386,6 +408,128 @@ const ExceptionDetail = () => {
               ))}
             </div>
           )}
+        </div>
+
+        {/* 案件处置（EVT-006 / MON-005）：误报/确认/关闭/重开 */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Scale className="w-5 h-5 text-teal-600" />
+            <h3 className="font-semibold text-gray-900">案件处置 <span className="text-xs text-gray-400 font-normal">（误报/重复标记 · 人工结案 · 重新打开）</span></h3>
+          </div>
+          {data.disposition && (
+            <p className="text-xs text-gray-500 mb-2">
+              处置：<span className="font-medium text-teal-700">{data.disposition === 'false_positive' ? '误报' : data.disposition === 'duplicate' ? '重复案件' : data.disposition === 'data_issue' ? '数据问题' : '已确认'}</span>
+              {data.disposition_by ? ' · ' + data.disposition_by : ''}
+              {data.disposition_at ? ' · ' + data.disposition_at.slice(0, 19).replace('T', ' ') : ''}
+              {data.disposition_note ? ' · "' + data.disposition_note + '"' : ''}
+            </p>
+          )}
+          {data.status === 'closed' ? (
+            <button
+              onClick={() => runOp(() => APIS[mode ?? '']!.reopenException(exceptionId!), '已重新打开')}
+              className="px-3 py-1.5 rounded bg-teal-600 text-white text-sm hover:bg-teal-700"
+            >
+              重新打开（二次异常）
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={dispMode}
+                  onChange={(e) => setDispMode(e.target.value)}
+                  className="text-sm px-3 py-1.5 rounded border border-gray-300"
+                >
+                  <option value="confirmed">确认真实异常</option>
+                  <option value="false_positive">标记误报</option>
+                  <option value="duplicate">标记重复案件</option>
+                  <option value="data_issue">标记数据问题</option>
+                </select>
+                <input
+                  value={dispNote}
+                  onChange={(e) => setDispNote(e.target.value)}
+                  placeholder="备注（可选）"
+                  className="text-sm px-3 py-1.5 rounded border border-gray-300 w-64"
+                />
+                <button
+                  onClick={() => runOp(() => APIS[mode ?? '']!.dispositionException(exceptionId!, { disposition: dispMode, note: dispNote, by: 'Coordinator' }), '已记录处置并关闭案件')}
+                  className="px-3 py-1.5 rounded bg-teal-600 text-white text-sm hover:bg-teal-700"
+                >
+                  记录处置并关闭
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={dispNote}
+                  onChange={(e) => setDispNote(e.target.value)}
+                  placeholder="结案证据（POD/交付/海关放行…）"
+                  className="text-sm px-3 py-1.5 rounded border border-gray-300 w-64"
+                />
+                <button
+                  onClick={() => runOp(() => APIS[mode ?? '']!.closeException(exceptionId!, { evidence: dispNote || '人工核验' }), '已人工结案')}
+                  className="px-3 py-1.5 rounded border border-teal-600 text-teal-700 text-sm hover:bg-teal-50"
+                >
+                  人工结案
+                </button>
+              </div>
+            </div>
+          )}
+          {opMsg && <p className="text-xs text-gray-600 mt-2">{opMsg}</p>}
+          {data.reopen_count > 0 && (
+            <p className="text-[11px] text-gray-400 mt-1">已重开 {data.reopen_count} 次 · 原时间线保留</p>
+          )}
+        </div>
+
+        {/* 承运商报价（QTE-001/002） */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Scale className="w-5 h-5 text-orange-600" />
+            <h3 className="font-semibold text-gray-900">承运商报价 <span className="text-xs text-gray-400 font-normal">（人工录入 · 版本化 · 比较与选择）</span></h3>
+          </div>
+          {quotes.length > 0 && (
+            <div className="space-y-1.5 mb-3">
+              {quotes.map((q) => (
+                <div key={q.quote_id} className="flex items-center justify-between text-xs rounded border border-gray-200 bg-gray-50 px-3 py-1.5">
+                  <span>
+                    <span className="font-medium text-gray-800">{q.carrier}</span>
+                    <span className="text-gray-500 ml-2">{q.service ?? ''} · ￥{q.price_nzd}{q.surcharges_nzd ? ' + 附加费 ' + q.surcharges_nzd : ''}</span>
+                    {q.new_eta ? ' · 新ETA ' + q.new_eta.slice(5, 16).replace('T', ' ') : ''}
+                    <span className="text-gray-400 ml-2">v{q.version}</span>
+                  </span>
+                  <span className="flex items-center gap-2 shrink-0 ml-2">
+                    <span className={q.status === 'selected' ? 'text-teal-600 font-medium' : q.status === 'rejected' ? 'text-gray-400' : 'text-gray-500'}>
+                      {q.status === 'selected' ? '已选择' : q.status === 'rejected' ? '未选用' : '待比较'}
+                    </span>
+                    {q.status === 'received' && (
+                      <button
+                        onClick={() => runOp(() => worldAPI.selectQuote(q.quote_id), '已选择报价')}
+                        className="px-2 py-0.5 rounded bg-orange-600 text-white hover:bg-orange-700"
+                      >
+                        选择
+                      </button>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={qCarrier} onChange={(e) => setQCarrier(e.target.value)} placeholder="承运商" className="text-sm px-3 py-1.5 rounded border border-gray-300 w-36" />
+            <input value={qPrice} onChange={(e) => setQPrice(e.target.value)} placeholder="价格 NZD" type="number" className="text-sm px-3 py-1.5 rounded border border-gray-300 w-28" />
+            <input value={qEta} onChange={(e) => setQEta(e.target.value)} placeholder="新ETA(可选)" className="text-sm px-3 py-1.5 rounded border border-gray-300 w-44" />
+            <input value={qNote} onChange={(e) => setQNote(e.target.value)} placeholder="备注(可选)" className="text-sm px-3 py-1.5 rounded border border-gray-300 w-44" />
+            <button
+              onClick={() => runOp(async () => {
+                await worldAPI.createQuote({
+                  mode, exception_id: data.exception_id, carrier: qCarrier,
+                  price_nzd: parseFloat(qPrice), new_eta: qEta || undefined, note: qNote || undefined,
+                });
+                setQCarrier(''); setQPrice(''); setQEta(''); setQNote('');
+              }, '报价已录入')}
+              className="px-3 py-1.5 rounded bg-orange-600 text-white text-sm hover:bg-orange-700"
+            >
+              录入报价
+            </button>
+          </div>
         </div>
 
         {/* 客户通知 */}

@@ -27,6 +27,11 @@ class ExceptionNotification(Base):
     sent_status = Column(String(20), nullable=False, default='pending')  # pending/sent/failed/delivered
     external_message_id = Column(String(100), nullable=True)  # 邮件/SMS 网关回写的外部消息 ID
     sent_real_at = Column(DateTime, nullable=True)  # 真实外发时间（真实世界时间）
+    # COM-003 人工审核：高风险/敏感客户通知必须人工确认后才能外发
+    review_status = Column(String(20), nullable=False, default='approved')  # approved/pending_review/rejected
+    reviewed_by = Column(String(100), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    edited_message = Column(Text, nullable=True)  # 审核修改后的最终文案
     message = Column(Text, nullable=False)  # plain-English 通知
     revised_eta = Column(DateTime, nullable=True)
     confidence = Column(Float, nullable=True)  # AI 置信度

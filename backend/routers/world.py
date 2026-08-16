@@ -465,6 +465,123 @@ async def record_tms_update(body: dict, db: Session = Depends(get_db)):
         "field": row.field, "new_value": row.new_value, "status": row.status}}
 
 
+@router.get("/world/notifications")
+async def get_world_notifications(
+    review_status: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """跨模式通知队列（COM-003 人工审核：review_status=pending_review 待审通知）。"""
+    from notification_models import ExceptionNotification
+    query = db.query(ExceptionNotification)
+    if review_status:
+        query = query.filter(ExceptionNotification.review_status == review_status)
+    rows = query.order_by(ExceptionNotification.sent_at.desc()).limit(limit).all()
+    return {
+        "count": len(rows),
+        "notifications": [
+            {
+                "notification_id": n.notification_id, "mode": n.mode,
+                "exception_id": n.exception_id, "reference": n.reference,
+                "recipient": n.recipient, "channel": n.channel,
+                "recipient_email": n.recipient_email, "recipient_phone": n.recipient_phone,
+                "sent_status": n.sent_status, "review_status": n.review_status,
+                "message": n.message, "edited_message": n.edited_message,
+                "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
+                "sent_at": n.sent_at.isoformat(),
+            }
+            for n in rows
+        ],
+    }
+
+
+@router.post("/notifications/{notification_id}/review")
+async def review_notification(notification_id: str, body: dict, db: Session = Depends(get_db)):
+    """通知人工审核（COM-003）：body={action: approve|edit|reject, message?, reviewed_by}。"""
+    from datetime import datetime as _dt
+    from notification_models import ExceptionNotification
+    n = db.query(ExceptionNotification).filter(
+        ExceptionNotification.notification_id == notification_id).first()
+    if not n:
+        raise HTTPException(status_code=404, detail="notification not found")
+    action = body.get("action")
+    if action not in ("approve", "edit", "reject"):
+        raise HTTPException(status_code=400, detail="action must be approve / edit / reject")
+    n.reviewed_by = (body.get("reviewed_by") or "Coordinator").strip() or "Coordinator"
+    n.reviewed_at = _dt.utcnow()
+    if action == "approve":
+        n.review_status = "approved"
+    elif action == "edit":
+        msg = body.get("message")
+        if not msg:
+            raise HTTPException(status_code=400, detail="message is required for edit")
+        n.edited_message = msg
+        n.review_status = "approved"
+    elif action == "reject":
+        n.review_status = "rejected"
+    db.commit()
+    return {
+        "success": True,
+        "notification_id": n.notification_id,
+        "review_status": n.review_status,
+        "edited_message": n.edited_message,
+    }
+
+
+@router.get("/world/quotes")
+async def get_world_quotes(
+    exception_id: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """承运商报价列表（QTE-001/002：按异常查看并比较报价）。"""
+    from quote_models import CarrierQuote
+    query = db.query(CarrierQuote)
+    if exception_id:
+        query = query.filter(CarrierQuote.exception_id == exception_id)
+    rows = query.order_by(CarrierQuote.quote_at.desc()).limit(limit).all()
+    return {
+        "count": len(rows),
+        "quotes": [
+            {
+                "quote_id": q.quote_id, "mode": q.mode, "exception_id": q.exception_id,
+                "carrier": q.carrier, "service": q.service,
+                "price_nzd": q.price_nzd, "currency": q.currency,
+                "surcharges_nzd": q.surcharges_nzd, "capacity_note": q.capacity_note,
+                "new_eta": q.new_eta.isoformat() if q.new_eta else None,
+                "valid_until": q.valid_until.isoformat() if q.valid_until else None,
+                "status": q.status, "version": q.version, "note": q.note,
+                "quote_at": q.quote_at.isoformat() if q.quote_at else None,
+            }
+            for q in rows
+        ],
+    }
+
+
+@router.post("/world/quotes")
+async def create_world_quote(body: dict, db: Session = Depends(get_db)):
+    """人工录入承运商报价（QTE-001）：body={mode, exception_id, carrier, price_nzd, service, new_eta, note, ...}。"""
+    from quote_models import create_quote
+    try:
+        row = create_quote(db, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "quote_id": row.quote_id, "version": row.version,
+            "status": row.status, "carrier": row.carrier, "price_nzd": row.price_nzd}
+
+
+@router.post("/world/quotes/{quote_id}/select")
+async def select_world_quote(quote_id: str, db: Session = Depends(get_db)):
+    """选择报价（QTE-002：其余报价置为 rejected）。"""
+    from quote_models import select_quote
+    try:
+        q = select_quote(db, quote_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "quote_id": q.quote_id, "status": q.status,
+            "exception_id": q.exception_id}
+
+
 @router.post("/notifications/{notification_id}/delivery")
 async def mark_notification_delivery(notification_id: str, body: dict, db: Session = Depends(get_db)):
     """外发 worker 回写真实送达状态（body: status=sent|failed|delivered, external_message_id?）。"""
