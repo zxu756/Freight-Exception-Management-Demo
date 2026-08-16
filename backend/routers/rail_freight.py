@@ -152,7 +152,7 @@ async def get_rail_consignment_lines(consignment_number: str, db: Session = Depe
 @router.get("/rail/exceptions")
 async def get_rail_exceptions(
     exception_type: Optional[str] = None, risk_level: Optional[str] = None,
-    status: Optional[str] = None, db: Session = Depends(get_db)):
+    status: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)):
     query = db.query(RailException)
     if exception_type:
         query = query.filter(RailException.exception_type == exception_type)
@@ -160,7 +160,7 @@ async def get_rail_exceptions(
         query = query.filter(RailException.risk_level == risk_level)
     if status:
         query = query.filter(RailException.status == status)
-    rows = query.order_by(RailException.risk_score.desc()).all()
+    rows = query.order_by(RailException.risk_score.desc()).limit(limit).all()
     return {"count": len(rows), "exceptions": [
         {"exception_id": x.exception_id, "consignment_number": x.consignment_number,
          "exception_type": x.exception_type, "severity": x.severity,
@@ -288,9 +288,15 @@ async def get_rail_dashboard(db: Session = Depends(get_db)):
     open_exc = db.query(RailException).filter(RailException.status != "resolved").count()
     high_risk = db.query(RailException).filter(RailException.risk_level == "high", RailException.status != "resolved").count()
     pending = db.query(RailException).filter(RailException.status == "pending_approval").count()
+    by_type = {}
+    by_risk = {}
+    for x in db.query(RailException).filter(RailException.status != "resolved").all():
+        by_type[x.exception_type] = by_type.get(x.exception_type, 0) + 1
+        by_risk[x.risk_level] = by_risk.get(x.risk_level, 0) + 1
     return {"consignments": {"total": total, "intermodal": intermodal, "bulk": bulk, "general": total - intermodal - bulk},
             "services": {"active": active, "delayed": delayed},
-            "exceptions": {"open": open_exc, "high_risk": high_risk, "pending_approval": pending},
+            "exceptions": {"open": open_exc, "high_risk": high_risk, "pending_approval": pending,
+                           "by_type": by_type, "by_risk_level": by_risk},
             "segments": {"restricted_or_closed": db.query(RailSegment).filter(RailSegment.condition.in_(["restricted", "closed"])).count()}}
 
 

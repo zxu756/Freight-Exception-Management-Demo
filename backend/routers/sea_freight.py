@@ -293,9 +293,10 @@ async def get_sea_exceptions(
     exception_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
+    limit: int = 200,
     db: Session = Depends(get_db)
 ):
-    """Get sea freight exceptions."""
+    """Get sea freight exceptions (列表默认 limit=200，防止超大载荷拖垮前端；详情请用 detail 端点)。"""
     query = db.query(SeaException)
     if exception_type:
         query = query.filter(SeaException.exception_type == exception_type)
@@ -303,7 +304,7 @@ async def get_sea_exceptions(
         query = query.filter(SeaException.risk_level == risk_level)
     if status:
         query = query.filter(SeaException.status == status)
-    exceptions = query.order_by(SeaException.risk_score.desc()).all()
+    exceptions = query.order_by(SeaException.risk_score.desc()).limit(limit).all()
     return {
         "count": len(exceptions),
         "exceptions": [

@@ -356,10 +356,11 @@ async def get_air_exceptions(
     exception_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
+    limit: int = 200,
     db: Session = Depends(get_db)
 ):
     """
-    Get air cargo exceptions.
+    Get air cargo exceptions (列表默认 limit=200，防超大载荷拖垮前端；详情请用 detail 端点).
 
     Args:
         exception_type: Filter by exception type
@@ -376,7 +377,7 @@ async def get_air_exceptions(
         query = query.filter(AirException.risk_level == risk_level)
     if status:
         query = query.filter(AirException.status == status)
-    exceptions = query.order_by(AirException.risk_score.desc()).all()
+    exceptions = query.order_by(AirException.risk_score.desc()).limit(limit).all()
     return {
         "count": len(exceptions),
         "exceptions": [

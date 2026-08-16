@@ -185,7 +185,7 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
         )}
 
         {/* Exception type distribution */}
-        {Object.keys(exceptions.by_type).length > 0 && (
+        {(exceptions.by_type ?? {}) && Object.keys(exceptions.by_type ?? {}).length > 0 && (
           <div>
             <span className="text-xs font-medium text-gray-500">异常类型</span>
             <div className="mt-2 space-y-1.5">

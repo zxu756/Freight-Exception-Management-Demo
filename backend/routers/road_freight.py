@@ -321,9 +321,10 @@ async def get_road_exceptions(
     exception_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
+    limit: int = 200,
     db: Session = Depends(get_db)
 ):
-    """Get road freight exceptions."""
+    """Get road freight exceptions (列表默认 limit=200，防超大载荷拖垮前端)."""
     query = db.query(RoadException)
     if exception_type:
         query = query.filter(RoadException.exception_type == exception_type)
@@ -331,7 +332,7 @@ async def get_road_exceptions(
         query = query.filter(RoadException.risk_level == risk_level)
     if status:
         query = query.filter(RoadException.status == status)
-    exceptions = query.order_by(RoadException.risk_score.desc()).all()
+    exceptions = query.order_by(RoadException.risk_score.desc()).limit(limit).all()
     return {
         "count": len(exceptions),
         "exceptions": [
