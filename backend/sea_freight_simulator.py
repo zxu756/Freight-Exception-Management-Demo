@@ -30,8 +30,9 @@ from sea_freight_seed import (
 )
 from risk_calculator import calculate_risk_score, categorize_risk, calculate_severity
 from config import settings
-from event_classifier import classifier, map_exception_to_categories, RECOVERY_PLAYBOOK, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery
+from event_classifier import classifier, map_exception_to_categories, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery, recovery_options_json
 from notification_models import ExceptionNotification, build_customer_notification
+from customer_models import get_customer_contact
 from llm_client import enhance_diagnosis
 from sla_models import get_policy, determine_breach, estimate_penalty, map_service_level_to_tier, is_excused, evaluate_breach
 from environment_events import generate_event, get_active_events_for_route
@@ -752,7 +753,7 @@ class SeaFreightSimulator:
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
         cost = estimate_recovery_cost(exc_type, _value)
-        best_action, action_reason = select_best_recovery(category, _value, _tier)
+        best_action, action_reason = select_best_recovery(category, _value, _tier, recovery)
         if cls["is_ood"] and settings.llm_enabled:
             diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
@@ -775,7 +776,7 @@ class SeaFreightSimulator:
             ai_confidence=round(random.uniform(0.85, 0.98), 2),
             status=_status,
             requires_human_approval=_requires,
-            recovery_options=json.dumps(RECOVERY_PLAYBOOK.get(category, recovery)),
+            recovery_options=recovery_options_json(category, _value, _tier, recovery),
             delay_hours=delay_hours,
             business_section=cls["business_section"],
             classification_confidence=cls["classification_confidence"],
@@ -800,17 +801,25 @@ class SeaFreightSimulator:
                      container.estimated_delivery)
 
     def _notify(self, db, exc, customer_name, reference, category, root_cause, recovery, confidence, revised_eta):
+        contact = get_customer_contact(db, customer_name) or {}
+        channel = contact.get("channel") or "email"
+        msg = build_customer_notification(
+            customer_name, reference, category, root_cause, revised_eta,
+            recovery, confidence, self.sim_now + timedelta(hours=2)
+        )
+        if channel == "sms":
+            eta = revised_eta.strftime("%d %b %H:%M") if revised_eta else "TBC"
+            msg = f"Freight alert for {reference}: {category}. Revised ETA {eta}. Details emailed."
         db.add(ExceptionNotification(
             notification_id=f"NTF-SEA-{self._exc_counter:06d}",
             mode="sea",
             exception_id=exc.exception_id,
             reference=reference,
             recipient=customer_name,
-            channel="email",
-            message=build_customer_notification(
-                customer_name, reference, category, root_cause, revised_eta,
-                recovery, confidence, self.sim_now + timedelta(hours=2)
-            ),
+            recipient_email=contact.get("email"),
+            recipient_phone=contact.get("phone") or contact.get("mobile"),
+            channel=channel,
+            message=msg,
             revised_eta=revised_eta,
             confidence=confidence,
             next_update_at=self.sim_now + timedelta(hours=2),
@@ -819,6 +828,7 @@ class SeaFreightSimulator:
 
     def _create_predicted_exception(self, db, container, anomaly, transition):
         """Create a predictive anomaly exception from a dwell-time outlier."""
+        best_action, action_reason = select_best_recovery(None, None, None, ["monitor", "expedite_discharge"])
         exc = SeaException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             container_number=container.container_number,
@@ -832,7 +842,9 @@ class SeaFreightSimulator:
             ai_confidence=round(random.uniform(0.7, 0.85), 2),
             status="detected",
             requires_human_approval=True,
-            recovery_options=json.dumps(["monitor", "expedite_discharge"]),
+            recovery_options=recovery_options_json(None, None, None, ["monitor", "expedite_discharge"]),
+            recommended_action=best_action,
+            recommendation_reason=action_reason,
             delay_hours=0.0,
             business_section="Time & Service Disruption",
             classification_decision="human_review",

@@ -62,15 +62,17 @@ const ExceptionDetail = () => {
       .catch(() => setError(true));
   }, [mode, exceptionId]);
 
-  // 票级异常：加载同箱/同单/同主单的全部票做对比
+  // 票级异常：加载同箱/同单/同主单的全部票做对比（海运/陆运用票号，空运用分运单号）
   const lineNumber = data?.cargo?.line_number;
-  const refNumber = data?.cargo?.container_number;
+  const hawbNumber = data?.cargo?.hawb_number;
+  const refNumber = data?.cargo?.container_number ?? data?.cargo?.awb_number;
+  const hasTicket = !!(lineNumber || hawbNumber);
   useEffect(() => {
-    if (!data || !lineNumber || !refNumber || !mode) { setSiblingLines(null); return; }
+    if (!data || !hasTicket || !refNumber || !mode) { setSiblingLines(null); return; }
     APIS[mode]?.getLines(refNumber)
       .then((d: any) => setSiblingLines(d.lines ?? d.house_waybills ?? []))
       .catch(() => setSiblingLines(null));
-  }, [data, lineNumber, refNumber, mode]);
+  }, [data, hasTicket, refNumber, mode]);
 
   if (error) {
     return (
@@ -91,8 +93,16 @@ const ExceptionDetail = () => {
     );
   }
 
-  const recoveryOptions = (() => {
-    try { return JSON.parse(data.recovery_options ?? '[]'); } catch { return []; }
+  // 恢复行动：新格式为带细节的对象数组（后端已按 最推荐→最不推荐 排序）；
+  // 老格式为字符串数组，这里兜底归一化。
+  const recoveryOptions: any[] = (() => {
+    try {
+      const raw = JSON.parse(data.recovery_options ?? '[]');
+      if (!Array.isArray(raw)) return [];
+      return raw.map((o: any) => typeof o === 'string'
+        ? { action: o, label: o, description: undefined, impact_hours: undefined, cost: undefined, score: undefined, why: undefined, recommended: o === data.recommended_action }
+        : o);
+    } catch { return []; }
   })();
 
   return (
@@ -119,9 +129,9 @@ const ExceptionDetail = () => {
             <div className="flex-1">
               <p className="font-medium text-gray-900">
                 {data.cargo?.commodity_desc ?? '未知货物'}
-                {lineNumber && (
+                {(lineNumber || hawbNumber) && (
                   <span className="ml-2 inline-block px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] align-middle font-semibold">
-                    第 {lineNumber} 票
+                    {lineNumber ? '第 ' + lineNumber + ' 票' : hawbNumber}
                   </span>
                 )}
               </p>
@@ -131,6 +141,11 @@ const ExceptionDetail = () => {
                 {data.cargo?.declared_value_nzd ? ` · 货值 $${data.cargo.declared_value_nzd.toLocaleString()}` : ''}
                 {data.cargo?.service_level ? ` · ${data.cargo.service_level} 服务` : ''}
               </p>
+              {data.cargo?.customer_email && (
+                <p className="text-xs text-gray-500 mt-0.5">
+                  联系人 {data.cargo.customer_contact} · {data.cargo.customer_email} · {data.cargo.customer_phone}
+                </p>
+              )}
               {data.cargo?.is_sla_breached && (
                 <p className="text-xs text-red-600 mt-1">
                   SLA 违约（{data.cargo.breach_type === 'excused' ? '已豁免' : '未豁免'}）
@@ -162,7 +177,7 @@ const ExceptionDetail = () => {
             <div className="space-y-1.5">
               {siblingLines.map((l: any) => {
                 const label = l.line_number != null ? '票' + l.line_number : (l.hawb_number ?? '—');
-                const isCurrent = (l.line_number ?? null) === (lineNumber ?? null);
+                const isCurrent = (l.line_number ?? l.hawb_number ?? null) === (lineNumber ?? hawbNumber ?? null);
                 const breached = !!l.is_sla_breached;
                 return (
                   <div key={label + (l.customer_name ?? '')} className={'flex items-center justify-between px-3 py-1.5 rounded border ' + (isCurrent ? 'border-purple-300 bg-purple-50' : breached ? 'border-red-200 bg-red-50' : 'border-gray-200')}>
@@ -208,21 +223,38 @@ const ExceptionDetail = () => {
           )}
         </Step>
 
-        {/* 步骤 3：AI 选行动 */}
-        <Step n={3} icon={MousePointerClick} title="AI Selects Pre-approved Recovery Action" subtitle="AI 选择预批准恢复行动">
-          <Field label="推荐行动" value={<span className="font-semibold text-blue-700">{data.recommended_action ?? '—'}</span>} highlight />
-          <Field label="推荐理由" value={data.recommendation_reason ?? '—'} />
-          {recoveryOptions.length > 0 && (
-            <div className="pt-1">
-              <p className="text-gray-500 mb-1">备选方案</p>
-              <div className="flex flex-wrap gap-1.5">
-                {recoveryOptions.map((a: string) => (
-                  <span key={a} className={`px-2 py-0.5 rounded text-xs ${a === data.recommended_action ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
-                    {a}
-                  </span>
-                ))}
-              </div>
+        {/* 步骤 3：AI 选行动（全部行动按推荐度排序，每项带细节） */}
+        <Step n={3} icon={MousePointerClick} title="AI Selects Pre-approved Recovery Action" subtitle="AI 选择预批准恢复行动（最推荐 → 最不推荐）">
+          {recoveryOptions.length > 0 ? (
+            <div className="space-y-2">
+              {recoveryOptions.map((o: any, i: number) => {
+                const isRecommended = o.recommended === true || o.action === data.recommended_action;
+                return (
+                  <div key={o.action + '-' + i} className={'rounded-lg border p-3 ' + (isRecommended ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-white')}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={'shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ' + (isRecommended ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600')}>{i + 1}</span>
+                        <span className="font-medium text-gray-900">{o.label ?? o.action}</span>
+                        {isRecommended && <span className="shrink-0 px-1.5 py-0.5 rounded bg-blue-600 text-white text-[10px] font-semibold">AI 推荐</span>}
+                      </div>
+                      <code className="shrink-0 text-[10px] text-gray-400">{o.action}</code>
+                    </div>
+                    {o.description && <p className="text-xs text-gray-600 mt-1.5">{o.description}</p>}
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500 mt-1.5">
+                      {o.impact_hours != null && <span>预计挽回约 {o.impact_hours}h 延误</span>}
+                      {o.cost != null && <span>成本 {'$' + o.cost.toLocaleString()}</span>}
+                      {o.score != null && <span>综合得分 {Number(o.score).toFixed(1)}</span>}
+                    </div>
+                    {o.why && <p className={'text-xs mt-1.5 ' + (isRecommended ? 'text-blue-700' : 'text-gray-500')}>{o.why}</p>}
+                  </div>
+                );
+              })}
             </div>
+          ) : (
+            <Field label="推荐行动" value={data.recommended_action ?? '—'} highlight />
+          )}
+          {data.recommendation_reason && (
+            <p className="text-xs text-gray-500 bg-gray-50 rounded p-2 mt-1">推荐理由：{data.recommendation_reason}</p>
           )}
         </Step>
 
@@ -245,6 +277,12 @@ const ExceptionDetail = () => {
             <div className="space-y-2">
               {data.notifications.map((n: any) => (
                 <div key={n.notification_id} className="bg-blue-50 border border-blue-100 rounded p-3 text-sm text-gray-700">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white border border-blue-200 text-blue-600">{n.channel === 'sms' ? '短信' : '邮件'}</span>
+                    {n.recipient_email
+                      ? <span className="text-[11px] text-gray-500">发至 {n.recipient} · {n.recipient_email}</span>
+                      : <span className="text-[11px] text-gray-500">收件人 {n.recipient}</span>}
+                  </div>
                   {n.message}
                 </div>
               ))}

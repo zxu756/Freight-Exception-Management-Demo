@@ -10,6 +10,8 @@ from database import get_db
 from road_freight_models import (
     Depot, RoadTrip, RoadConsignment, RoadTrackingEvent, RoadException, ConsignmentLine
 )
+from event_classifier import normalize_recovery_options_json
+from customer_models import get_customer
 
 router = APIRouter()
 
@@ -376,10 +378,18 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
 
     cons = db.query(RoadConsignment).filter(
         RoadConsignment.consignment_number == exc.consignment_number).first()
+    line = db.query(ConsignmentLine).filter(
+        ConsignmentLine.id == exc.consignment_line_id).first() if exc.consignment_line_id else None
 
     from notification_models import ExceptionNotification
     notifications = db.query(ExceptionNotification).filter(
-        ExceptionNotification.exception_id == exception_id).all()
+        ExceptionNotification.exception_id == exception_id,
+        ExceptionNotification.mode == "road").all()
+
+    _value = line.declared_value_nzd if line else (cons.declared_value_nzd if cons else None)
+    _tier = line.customer_tier if line else (cons.customer_tier if cons else None)
+    _cname = line.customer_name if line else (cons.customer_name if cons else None)
+    _cust = get_customer(db, _cname) if _cname else None
 
     return {
         "exception_id": exc.exception_id,
@@ -401,7 +411,8 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
         "is_ood": exc.is_ood,
         "anomaly_score": exc.anomaly_score,
         "anomaly_reason": exc.anomaly_reason,
-        "recovery_options": exc.recovery_options,
+        "recovery_options": normalize_recovery_options_json(
+            exc.recovery_options, exc.exception_category, _value, _tier),
         "recommended_action": exc.recommended_action,
         "recommendation_reason": exc.recommendation_reason,
         "recovery_cost": exc.recovery_cost,
@@ -410,25 +421,30 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "consignment_number": cons.consignment_number if cons else exc.consignment_number,
-            "commodity_desc": cons.commodity_desc if cons else None,
-            "declared_value_nzd": cons.declared_value_nzd if cons else None,
-            "customer_name": cons.customer_name if cons else None,
-            "customer_tier": cons.customer_tier if cons else None,
-            "service_level": cons.service_level if cons else None,
-            "sla_tier": cons.sla_tier if cons else None,
-            "is_sla_breached": cons.is_sla_breached if cons else False,
-            "breach_type": cons.breach_type if cons else None,
-            "sla_penalty_nzd": cons.sla_penalty_nzd if cons else None,
-            "service_level": cons.service_level if cons else None,
-            "sla_tier": cons.sla_tier if cons else None,
-            "is_sla_breached": cons.is_sla_breached if cons else False,
-            "breach_type": cons.breach_type if cons else None,
-            "sla_penalty_nzd": cons.sla_penalty_nzd if cons else None,
+            "consignment_line_id": exc.consignment_line_id,
+            "line_number": line.line_number if line else None,
+            "commodity_desc": line.commodity_desc if line else (cons.commodity_desc if cons else None),
+            "declared_value_nzd": line.declared_value_nzd if line else (cons.declared_value_nzd if cons else None),
+            "customer_name": line.customer_name if line else (cons.customer_name if cons else None),
+            "customer_tier": line.customer_tier if line else (cons.customer_tier if cons else None),
+            "customer_contact": _cust.contact_name if _cust else None,
+            "customer_email": _cust.email if _cust else None,
+            "customer_phone": _cust.phone if _cust else None,
+            "customer_channel": _cust.preferred_channel if _cust else None,
+            "service_level": line.service_level if line else (cons.service_level if cons else None),
+            "sla_tier": line.sla_tier if line else (cons.sla_tier if cons else None),
+            "is_sla_breached": line.is_sla_breached if line else (cons.is_sla_breached if cons else False),
+            "breach_type": line.breach_type if line else (cons.breach_type if cons else None),
+            "sla_penalty_nzd": line.sla_penalty_nzd if line else (cons.sla_penalty_nzd if cons else None),
             "route_type": cons.route_type if cons else None,
         },
         "notifications": [
             {
                 "notification_id": n.notification_id,
+                "recipient": n.recipient,
+                "channel": n.channel,
+                "recipient_email": n.recipient_email,
+                "recipient_phone": n.recipient_phone,
                 "message": n.message,
                 "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
                 "confidence": n.confidence,
@@ -547,6 +563,9 @@ async def get_road_notifications(limit: int = 20, db: Session = Depends(get_db))
                 "exception_id": n.exception_id,
                 "reference": n.reference,
                 "recipient": n.recipient,
+                "channel": n.channel,
+                "recipient_email": n.recipient_email,
+                "recipient_phone": n.recipient_phone,
                 "message": n.message,
                 "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
                 "confidence": n.confidence,
@@ -626,6 +645,8 @@ async def get_road_live(db: Session = Depends(get_db)):
             {
                 "exception_id": x.exception_id,
                 "consignment_number": x.consignment_number,
+                "consignment_line_id": x.consignment_line_id,
+                "line_number": x.consignment_line.line_number if x.consignment_line else None,
                 "exception_type": x.exception_type,
                 "risk_level": x.risk_level,
                 "risk_score": x.risk_score,

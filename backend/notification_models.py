@@ -21,6 +21,8 @@ class ExceptionNotification(Base):
     exception_id = Column(String(50), nullable=False, index=True)  # 关联异常
     reference = Column(String(50), nullable=False)  # 货物单号（awb/consignment/container）
     recipient = Column(String(200), nullable=False)  # 客户名
+    recipient_email = Column(String(200), nullable=True)  # 实际收件邮箱（客户主数据）
+    recipient_phone = Column(String(30), nullable=True)  # 实际收件电话（客户主数据）
     channel = Column(String(20), nullable=False, default='email')
     message = Column(Text, nullable=False)  # plain-English 通知
     revised_eta = Column(DateTime, nullable=True)

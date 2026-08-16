@@ -25,17 +25,19 @@ const WorldControl = () => {
   const [shipments, setShipments] = useState<any[]>([]);
   const [shipCount, setShipCount] = useState(0);
   const [predictions, setPredictions] = useState<any[]>([]);
+  const [customers, setCustomers] = useState<any[]>([]);
+  const [custFilter, setCustFilter] = useState('');
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [c, w, s, sh, pr] = await Promise.all([
-        worldAPI.getClock(), worldAPI.getWeather(), worldAPI.getState(), worldAPI.getShipments(), worldAPI.getPredictions(),
+      const [c, w, s, sh, pr, cu] = await Promise.all([
+        worldAPI.getClock(), worldAPI.getWeather(), worldAPI.getState(), worldAPI.getShipments(), worldAPI.getPredictions(), worldAPI.getCustomers(),
       ]);
       setClock(c); setRegions(w.regions ?? []); setEvents(s.active_events ?? []);
       setShipments(sh.shipments ?? []); setShipCount(sh.count ?? 0);
-      setPredictions(pr.predictions ?? []); setError(false);
+      setPredictions(pr.predictions ?? []); setCustomers(cu.customers ?? []); setError(false);
     } catch {
       setError(true);
     }
@@ -180,6 +182,36 @@ const WorldControl = () => {
                 <div className="mt-0.5 text-[10px] text-gray-400">
                   {p.mode} · {p.reference} · {p.status === 'predicted' ? '预测中' : '已应验'}
                 </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* 客户目录（基本信息 + 联系方式，通知去向） */}
+        <section className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+              <span className="text-xl">📇</span> 客户目录
+              <span className="text-xs text-gray-400">({customers.length} 家 · 异常通知发往这些联系方式)</span>
+            </h2>
+            <input
+              value={custFilter}
+              onChange={(e) => setCustFilter(e.target.value)}
+              placeholder="按名称过滤…"
+              className="text-sm px-3 py-1.5 rounded border border-gray-300 focus:border-sky-400 focus:outline-none w-56"
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2 max-h-[420px] overflow-y-auto">
+            {customers.filter((c) => !custFilter || c.name.toLowerCase().includes(custFilter.toLowerCase())).map((c) => (
+              <div key={c.customer_code} className="rounded-lg border border-gray-200 px-3 py-2 bg-gray-50">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-gray-800 truncate">{c.name}</span>
+                  <span className={'shrink-0 text-[10px] px-1.5 py-0.5 rounded ' + (c.tier === 'VIP' ? 'bg-purple-100 text-purple-700' : c.tier === 'high' ? 'bg-blue-100 text-blue-700' : c.tier === 'medium' ? 'bg-gray-200 text-gray-600' : 'bg-gray-100 text-gray-500')}>{c.tier}</span>
+                </div>
+                <p className="text-[11px] text-gray-500 mt-0.5">{c.contact_name} · {c.contact_title}</p>
+                <p className="text-[11px] text-gray-500 truncate">{c.email}</p>
+                <p className="text-[11px] text-gray-400">{c.phone} · {c.city}</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">偏好渠道: {c.preferred_channel === 'sms' ? '短信' : '邮件'} · {c.address_line}</p>
               </div>
             ))}
           </div>

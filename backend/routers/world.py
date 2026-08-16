@@ -5,6 +5,7 @@ World-level endpoints - the God Panel's control surface over the shared world.
 - /world/weather      : regional weather (deterministic + god overrides)
 """
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -195,5 +196,35 @@ async def get_world_predictions(db: Session = Depends(get_db)):
                 "status": r.status, "description": r.description,
             }
             for r in rows
+        ],
+    }
+
+
+@router.get("/world/customers")
+async def get_world_customers(q: Optional[str] = None, db: Session = Depends(get_db)):
+    """客户目录：所有客户的基本信息 + 联系方式（通知去向）。"""
+    from customer_models import Customer
+    query = db.query(Customer)
+    if q:
+        query = query.filter(Customer.name.ilike(f"%{q}%"))
+    rows = query.order_by(Customer.name).all()
+    return {
+        "count": len(rows),
+        "customers": [
+            {
+                "customer_code": c.customer_code,
+                "name": c.name,
+                "tier": c.tier,
+                "contact_name": c.contact_name,
+                "contact_title": c.contact_title,
+                "email": c.email,
+                "phone": c.phone,
+                "mobile": c.mobile,
+                "address_line": c.address_line,
+                "city": c.city,
+                "region": c.region,
+                "preferred_channel": c.preferred_channel,
+            }
+            for c in rows
         ],
     }

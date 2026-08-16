@@ -235,6 +235,7 @@ class RoadException(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     consignment = relationship("RoadConsignment", back_populates="exceptions")
+    consignment_line = relationship("ConsignmentLine")
 
 
 class RoadSegment(Base):

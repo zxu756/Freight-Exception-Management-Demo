@@ -10,6 +10,8 @@ from database import get_db
 from sea_freight_models import (
     SeaPort, VesselVisit, SeaContainer, SeaTrackingEvent, SeaException, CargoLine
 )
+from event_classifier import normalize_recovery_options_json
+from customer_models import get_customer
 
 router = APIRouter()
 
@@ -351,7 +353,13 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
 
     from notification_models import ExceptionNotification
     notifications = db.query(ExceptionNotification).filter(
-        ExceptionNotification.exception_id == exception_id).all()
+        ExceptionNotification.exception_id == exception_id,
+        ExceptionNotification.mode == "sea").all()
+
+    _value = exc.cargo_line.declared_value_nzd if exc.cargo_line else (container.declared_value_nzd if container else None)
+    _tier = exc.cargo_line.customer_tier if exc.cargo_line else (container.customer_tier if container else None)
+    _cname = exc.cargo_line.customer_name if exc.cargo_line else (container.customer_name if container else None)
+    _cust = get_customer(db, _cname) if _cname else None
 
     return {
         "exception_id": exc.exception_id,
@@ -373,7 +381,8 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
         "is_ood": exc.is_ood,
         "anomaly_score": exc.anomaly_score,
         "anomaly_reason": exc.anomaly_reason,
-        "recovery_options": exc.recovery_options,
+        "recovery_options": normalize_recovery_options_json(
+            exc.recovery_options, exc.exception_category, _value, _tier),
         "recommended_action": exc.recommended_action,
         "recommendation_reason": exc.recommendation_reason,
         "recovery_cost": exc.recovery_cost,
@@ -388,6 +397,10 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
             "declared_value_nzd": exc.cargo_line.declared_value_nzd if exc.cargo_line else (container.declared_value_nzd if container else None),
             "customer_name": exc.cargo_line.customer_name if exc.cargo_line else (container.customer_name if container else None),
             "customer_tier": exc.cargo_line.customer_tier if exc.cargo_line else (container.customer_tier if container else None),
+            "customer_contact": _cust.contact_name if _cust else None,
+            "customer_email": _cust.email if _cust else None,
+            "customer_phone": _cust.phone if _cust else None,
+            "customer_channel": _cust.preferred_channel if _cust else None,
             "service_level": exc.cargo_line.service_level if exc.cargo_line else (container.service_level if container else None),
             "sla_tier": exc.cargo_line.sla_tier if exc.cargo_line else (container.sla_tier if container else None),
             "is_sla_breached": exc.cargo_line.is_sla_breached if exc.cargo_line else (container.is_sla_breached if container else False),
@@ -399,6 +412,10 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
         "notifications": [
             {
                 "notification_id": n.notification_id,
+                "recipient": n.recipient,
+                "channel": n.channel,
+                "recipient_email": n.recipient_email,
+                "recipient_phone": n.recipient_phone,
                 "message": n.message,
                 "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
                 "confidence": n.confidence,
@@ -518,6 +535,9 @@ async def get_sea_notifications(limit: int = 20, db: Session = Depends(get_db)):
                 "exception_id": n.exception_id,
                 "reference": n.reference,
                 "recipient": n.recipient,
+                "channel": n.channel,
+                "recipient_email": n.recipient_email,
+                "recipient_phone": n.recipient_phone,
                 "message": n.message,
                 "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
                 "confidence": n.confidence,
@@ -565,6 +585,8 @@ async def get_sea_live(db: Session = Depends(get_db)):
             {
                 "exception_id": x.exception_id,
                 "container_number": x.container_number,
+                "cargo_line_id": x.cargo_line_id,
+                "line_number": x.cargo_line.line_number if x.cargo_line else None,
                 "exception_type": x.exception_type,
                 "risk_level": x.risk_level,
                 "risk_score": x.risk_score,

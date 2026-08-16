@@ -139,6 +139,7 @@ export const worldAPI = {
   getState: async () => (await api.get('/world/state')).data,
   getShipments: async () => (await api.get('/world/shipments')).data,
   getPredictions: async () => (await api.get('/world/predictions')).data,
+  getCustomers: async (q?: string) => (await api.get('/world/customers', { params: q ? { q } : undefined })).data,
 };
 
 export default api;

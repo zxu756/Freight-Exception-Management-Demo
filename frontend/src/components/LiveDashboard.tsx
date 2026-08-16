@@ -219,6 +219,12 @@ function TransportPanel({ mode, data }: { mode: ModeKey; data: ModeData }) {
                   </span>
                   <div className="min-w-0">
                     <span className="font-medium text-gray-800">{section}</span>
+                    {(exc as any).line_number != null && (
+                      <span className="ml-1 px-1 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px]">票{(exc as any).line_number}</span>
+                    )}
+                    {(exc as any).hawb_number && (
+                      <span className="ml-1 px-1 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px]">分单</span>
+                    )}
                     {aiMismatch && (
                       <span className="ml-1 px-1 py-0.5 bg-amber-100 text-amber-700 rounded text-[10px]">AI≠规则</span>
                     )}

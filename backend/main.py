@@ -12,6 +12,7 @@ import air_cargo_models  # noqa: F401  # Register air cargo tables on Base.metad
 import road_freight_models  # noqa: F401  # Register road freight tables on Base.metadata
 import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.metadata
 import notification_models  # noqa: F401  # Register customer notification table
+import customer_models  # noqa: F401  # Register customer master data table
 import sla_models  # noqa: F401  # Register SLA policy table
 import environment_models  # noqa: F401  # Register environmental event table
 import world.weather  # noqa: F401  # Register weather override table
@@ -105,6 +106,15 @@ def _migrate_ml_fields():
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE road_exceptions ADD COLUMN consignment_line_id INTEGER"))
 
+    # customer contact columns on exception_notifications (real delivery addresses)
+    if "exception_notifications" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("exception_notifications")}
+        with engine.begin() as conn:
+            if "recipient_email" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN recipient_email VARCHAR(200)"))
+            if "recipient_phone" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN recipient_phone VARCHAR(30)"))
+
     # SLA columns on cargo tables
     for table in ["air_waybills", "road_consignments", "sea_containers"]:
         if table not in insp.get_table_names():
@@ -133,10 +143,14 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _migrate_ml_fields()
     from sla_seed import seed_sla_policies
+    from customer_models import seed_customers
     from database import SessionLocal as _S
     _db = _S()
     try:
         seed_sla_policies(_db)
+        _created = seed_customers(_db)
+        if _created:
+            print(f"Customer directory seeded: {_created} new customers")
     finally:
         _db.close()
     print("Database initialized successfully")

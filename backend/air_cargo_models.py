@@ -259,3 +259,4 @@ class AirException(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     waybill = relationship("AirWaybill", back_populates="exceptions")
+    hawb = relationship("HouseWaybill")

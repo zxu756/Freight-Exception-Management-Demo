@@ -207,29 +207,138 @@ ACTION_COST = {
 }
 
 
-def select_best_recovery(category, cargo_value, customer_tier):
-    """Select the best pre-approved recovery action and explain why.
+# 每个恢复行动的元数据：(中文名, 行动说明, 预计挽回延误小时数)
+# 用于 AI 流水线第三步：把全部行动从"最推荐"排到"最不推荐"，每项带细节。
+ACTION_META = {
+    "priority_loading": ("优先装载", "协调码头/承运人将本票货优先装上下一个可用班次，压缩等待时间", 4),
+    "rebook_next_service": ("改订下一班", "改订最近一班可用运力，按新计划继续流转", 3),
+    "switch_route_or_mode": ("切换路线/方式", "绕开拥堵路段或更换运输方式（如海转空），牺牲成本换时效", 5),
+    "customer_contingency": ("客户应急预案", "与客户确认新 ETA 并激活其内部应急预案，干预最低", 2),
+    "inspection": ("联合检验", "安排检验机构/承运人到场确认损坏范围", 1),
+    "repacking": ("重新打包", "对损坏包装重新打包，减少后续损失", 2),
+    "salvage": ("残值处理", "评估可回收货物并安排残值处置", 2),
+    "replace_or_reship": ("补货/重发", "重新生产或调拨同等货物补发", 5),
+    "insurance_claim": ("保险理赔", "启动保险索赔并收集单证", 1),
+    "corrected_routing": ("纠正路由", "立即纠正路由信息，让货物回到正确路径", 4),
+    "intercept": ("中途拦截", "在下一节点拦截货物，防止进一步错运", 3),
+    "transfer_correct_lane": ("转运正确通道", "将货物转运到正确的分拣/运输通道", 4),
+    "relabel_or_rebook": ("重贴标签/重订", "更正标签并重订运输", 3),
+    "submit_documents": ("补充单证", "补齐商业发票/申报单等所需单证", 2),
+    "duty_payment": ("缴税", "完成关税缴纳，解除财务限制", 2),
+    "coordinate_inspection": ("配合查验", "预约海关/MPI 查验并到场配合", 3),
+    "broker_escalation": ("报关行升级", "升级报关行加急处理放行", 2),
+    "network_trace": ("全网追踪", "在承运网络内发起追踪，定位最后扫描位置", 1.5),
+    "stop_wrong_delivery": ("阻止错误派送", "通知末端站点阻止错误签收", 2),
+    "replacement": ("替换货物", "安排同等货物替换发运", 5),
+    "alternate_supply": ("替代货源", "从替代货源调货以满足客户需求", 4),
+    "correct_instructions": ("更正指令", "更正交付指令/地址信息", 1.5),
+    "new_appointment": ("重新预约", "与收货方重新预约交付窗口", 1.5),
+    "redelivery": ("再次派送", "安排再次派送", 2),
+    "depot_collection": ("站点自提", "安排客户到站点自提", 1.5),
+    "correct_master_data": ("修正主数据", "修正运单/主数据错误", 1),
+    "resend_event": ("重发事件", "要求承运人重发跟踪事件", 1),
+    "integration_ticket": ("集成工单", "向 IT 集成团队提工单修复数据链路", 1),
+    "manual_milestone": ("人工里程碑", "人工补录里程碑，恢复货物可见性", 1),
+    "substitute_equipment": ("更换设备", "更换车辆/箱体等设备", 3),
+    "split_or_prioritise": ("拆分/优先", "拆分货物或优先处理关键部分", 3),
+    "rebook_or_reroute": ("重订/改道", "重订运力或改道避开瓶颈", 3),
+    "expedite_critical": ("加急专线", "启动加急专线（专车/专机），最快恢复时效", 8),
+    "monitor": ("持续监控", "先保持监控，等待事件自然缓解（零成本）", 0.5),
+    "survey_inspection": ("第三方检验", "邀请第三方检验机构出具调查报告", 1),
+    "reschedule": ("改期", "与收货方重新约定交付时间", 1.5),
+    "expedite_discharge": ("加急卸船", "申请加急卸船/优先提箱", 3),
+    "waive": ("SLA 豁免", "评估并豁免本票 SLA 违约金，维护客户关系", 0),
+    "compensate": ("赔偿", "按合同向客户赔付损失", 0),
+    "upgrade_priority": ("升级优先", "升级舱位/运力优先级", 3),
+    "reroute": ("改道", "改道绕开异常路段", 4),
+}
 
-    For low-value shipments the AI prefers the lowest-cost action; for
-    high-value / VIP customers it prefers the most decisive (expedite) action.
+
+def build_recovery_options(category, cargo_value, customer_tier, custom_actions=None):
+    """把该异常可用的预批准恢复行动排成 最推荐 → 最不推荐 的列表，每项带细节。
+
+    打分规则（AI 决策偏好）：
+    - 高价值/VIP 货：果断优先，score = 挽回小时 * 1.2 - 成本/200（加急专线额外 +2）
+    - 普通货：低成本优先，score = 挽回小时 * 0.3 - 成本/60
     """
-    actions = RECOVERY_PLAYBOOK.get(category, ["monitor"])
-    costs = {a: ACTION_COST.get(a, 200) for a in actions}
+    actions = list(RECOVERY_PLAYBOOK.get(category) or custom_actions or ["monitor"])
     high_value = (cargo_value or 0) >= 50000 or customer_tier in ("VIP", "high")
 
-    if high_value and "expedite_critical" in actions:
-        best = "expedite_critical"
-    elif high_value and "rebook_next_service" in actions:
-        best = "rebook_next_service"
-    else:
-        best = min(actions, key=lambda a: costs[a])
+    scored = []
+    for action in actions:
+        label, desc, impact_hours = ACTION_META.get(
+            action, (action, f"执行预批准行动 {action}", 1.0))
+        cost = ACTION_COST.get(action, 200)
+        if high_value:
+            score = impact_hours * 1.2 - cost / 200.0 + (2.0 if action == "expedite_critical" else 0.0)
+        else:
+            score = impact_hours * 0.3 - cost / 60.0
+        scored.append({"action": action, "label": label, "description": desc,
+                       "impact_hours": impact_hours, "cost": cost, "score": round(score, 2)})
+    scored.sort(key=lambda o: (-o["score"], o["cost"], o["action"]))
 
-    reason = (
-        f"Selected '{best}' (est. ${costs.get(best, 200)}) among {len(actions)} "
-        f"pre-approved options for a ${(cargo_value or 0):,.0f} shipment to a "
-        f"{customer_tier or 'standard'} customer."
-    )
-    return best, reason
+    # 内部效用分可能为负，转成 0-100 展示分再输出（排序结果不变）
+    for o in scored:
+        o["score"] = max(0.0, min(100.0, round(50.0 + o["score"] * 8.0, 1)))
+
+    top = scored[0]
+    for i, o in enumerate(scored):
+        if i == 0:
+            o["why"] = (f"综合得分 {o['score']:.1f} 排名第一：预计挽回约 {o['impact_hours']}h 延误，"
+                        f"成本 ${o['cost']:,}，收益/成本比最优。")
+        else:
+            weaker = (f"挽回延误较少（{o['impact_hours']}h）"
+                      if o["impact_hours"] < top["impact_hours"]
+                      else f"成本更高（${o['cost']:,}）")
+            o["why"] = f"综合得分 {o['score']:.1f}：{weaker}，性价比低于第一方案。"
+        o["recommended"] = (i == 0)
+    return scored
+
+
+def recovery_options_json(category, cargo_value=None, customer_tier=None, custom_actions=None):
+    """序列化排序后的恢复行动列表（新异常写入用）。"""
+    import json as _json
+    return _json.dumps(
+        build_recovery_options(category, cargo_value, customer_tier, custom_actions),
+        ensure_ascii=False)
+
+
+def select_best_recovery(category, cargo_value, customer_tier, custom_actions=None):
+    """Select the best pre-approved recovery action and explain why (top of the ranked list)."""
+    ranked = build_recovery_options(category, cargo_value, customer_tier, custom_actions)
+    best = ranked[0]
+    high_value = (cargo_value or 0) >= 50000 or customer_tier in ("VIP", "high")
+    context = ("高价值/VIP 货，AI 偏好果断、快速的方案。" if high_value
+               else "普通货，AI 偏好低成本方案。")
+    reason = (f"在 {len(ranked)} 个预批准恢复方案中，'{best['action']}'（{best['label']}）综合得分最高："
+              f"预计挽回约 {best['impact_hours']}h 延误、成本 ${best['cost']:,}。{context}")
+    return best["action"], reason
+
+
+def normalize_recovery_options_json(stored, category, cargo_value=None, customer_tier=None):
+    """存量数据兼容：把老的字符串数组升级为带细节的排序对象数组（读取时调用）。"""
+    import json as _json
+    try:
+        parsed = _json.loads(stored) if stored else []
+    except Exception:
+        parsed = []
+    if not parsed:
+        return "[]"
+    if isinstance(parsed[0], dict):
+        nums = [o.get("score") for o in parsed
+                if isinstance(o, dict) and isinstance(o.get("score"), (int, float))]
+        # 早期版本写入的原始效用分（可能为负，或最大分 < 20）→ 重算为 0-100 展示分
+        if nums and (any(n < 0 for n in nums) or max(nums) < 20):
+            actions = [o.get("action") for o in parsed
+                       if isinstance(o, dict) and isinstance(o.get("action"), str)]
+            return _json.dumps(
+                build_recovery_options(category, cargo_value, customer_tier, actions),
+                ensure_ascii=False)
+        return stored  # 已是新格式
+    custom = [a for a in parsed if isinstance(a, str)]
+    return _json.dumps(
+        build_recovery_options(category, cargo_value, customer_tier, custom),
+        ensure_ascii=False)
 
 # Cold-start representative templates (used until the classifier has learned).
 SECTION_TEMPLATES = {
