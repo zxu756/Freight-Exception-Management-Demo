@@ -301,6 +301,7 @@ async def get_world_tickets(limit: int = 500, db: Session = Depends(get_db)):
     from sea_freight_models import CargoLine, SeaContainer
     from air_cargo_models import HouseWaybill, AirWaybill
     from road_freight_models import ConsignmentLine, RoadConsignment
+    from rail_freight_models import RailConsignmentLine, RailConsignment
     from customer_models import Customer
 
     tickets = []
@@ -358,6 +359,24 @@ async def get_world_tickets(limit: int = 500, db: Session = Depends(get_db)):
             "customer_email": cust.email if cust else None,
         })
 
+    for line in db.query(RailConsignmentLine).order_by(RailConsignmentLine.id.desc()).limit(limit).all():
+        parent = db.query(RailConsignment).filter(
+            RailConsignment.consignment_number == line.consignment_number).first()
+        cust = db.query(Customer).filter(Customer.name == line.customer_name).first()
+        tickets.append({
+            "mode": "rail", "parent_reference": line.consignment_number,
+            "ticket_number": str(line.line_number),
+            "commodity_desc": line.commodity_desc, "commodity_code": line.commodity_code,
+            "customer_name": line.customer_name, "customer_tier": line.customer_tier,
+            "declared_value_nzd": line.declared_value_nzd,
+            "service_level": line.service_level, "sla_tier": line.sla_tier,
+            "sla_deadline": line.sla_deadline.isoformat() if line.sla_deadline else None,
+            "is_sla_breached": line.is_sla_breached, "breach_type": line.breach_type,
+            "sla_penalty_nzd": line.sla_penalty_nzd,
+            "parent_status": parent.current_status if parent else None,
+            "customer_email": cust.email if cust else None,
+        })
+
     tickets.sort(key=lambda t: t["sla_deadline"] or "", reverse=True)
     tickets = tickets[:limit]
     return {"count": len(tickets), "tickets": tickets}
@@ -398,6 +417,52 @@ async def record_customer_contact(body: dict, db: Session = Depends(get_db)):
             "contacted_at": row.contacted_at.isoformat(),
         },
     }
+
+
+@router.get("/world/tms-updates")
+async def get_tms_updates(limit: int = 50, db: Session = Depends(get_db)):
+    """TMS/门户回写审计（Scenario 4: update the TMS and customer portal automatically）。"""
+    from decision_models import TmsUpdate
+    rows = db.query(TmsUpdate).order_by(TmsUpdate.id.desc()).limit(limit).all()
+    return {
+        "count": len(rows),
+        "updates": [
+            {
+                "update_id": u.update_id, "mode": u.mode, "exception_id": u.exception_id,
+                "reference": u.reference, "target": u.target, "field": u.field,
+                "old_value": u.old_value, "new_value": u.new_value, "status": u.status,
+                "applied_at": u.applied_at.isoformat() if u.applied_at else None,
+            }
+            for u in rows
+        ],
+    }
+
+
+@router.post("/world/tms-updates")
+async def record_tms_update(body: dict, db: Session = Depends(get_db)):
+    """手动登记一次 TMS/门户回写（body: mode, exception_id, field, new_value, reference?, target?, old_value?, status?）。"""
+    import uuid as _uuid
+    from decision_models import TmsUpdate
+    mode = body.get("mode")
+    exception_id = body.get("exception_id")
+    field = body.get("field")
+    new_value = body.get("new_value")
+    if not mode or not exception_id or not field or new_value is None:
+        raise HTTPException(status_code=400, detail="mode, exception_id, field, new_value are required")
+    row = TmsUpdate(
+        update_id=f"TMS-{_uuid.uuid4().hex[:10]}",
+        mode=mode, exception_id=exception_id,
+        reference=body.get("reference"),
+        target=body.get("target") or "tms",
+        field=field, old_value=body.get("old_value"), new_value=str(new_value),
+        status=body.get("status") or "applied",
+        applied_at=world_clock.now,
+    )
+    db.add(row)
+    db.commit()
+    return {"success": True, "update": {
+        "update_id": row.update_id, "mode": row.mode, "exception_id": row.exception_id,
+        "field": row.field, "new_value": row.new_value, "status": row.status}}
 
 
 @router.post("/notifications/{notification_id}/delivery")

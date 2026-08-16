@@ -125,6 +125,29 @@ def refresh_carrier_performance(db, now):
         .all()
     )
 
+    # ---- rail: per operator + lane ----------------
+    from rail_freight_models import RailService
+    rail_rows = (
+        db.query(
+            RailService.operator, RailService.origin, RailService.destination,
+            func.count(RailService.train_number),
+            func.sum(case((RailService.delay_minutes > 0, 1), else_=0)),
+            func.sum(case((RailService.status == "cancelled", 1), else_=0)),
+            func.avg(RailService.delay_minutes),
+        )
+        .filter(RailService.scheduled_departure <= now)
+        .group_by(RailService.operator, RailService.origin, RailService.destination)
+        .all()
+    )
+    rail_reasons = _top_reasons(
+        db.query(
+            RailService.operator, RailService.delay_reason_code, func.count(RailService.train_number),
+        )
+        .filter(RailService.delay_reason_code.isnot(None), RailService.scheduled_departure <= now)
+        .group_by(RailService.operator, RailService.delay_reason_code)
+        .all()
+    )
+
     # 统一成 (carrier_key, origin, destination, total, delayed, cancelled, avg)
     sea_norm = [(r[0], None, None, int(r[1] or 0), int(r[2] or 0), 0, float(r[3] or 0))
                 for r in sea_rows]
@@ -132,6 +155,8 @@ def refresh_carrier_performance(db, now):
                  int(r[5] or 0), float(r[6] or 0)) for r in air_rows]
     road_norm = [(f"{r[0]}|{r[1]}|{r[2]}", r[1], r[2], int(r[3] or 0), int(r[4] or 0),
                   int(r[5] or 0), float(r[6] or 0)) for r in road_rows]
+    rail_norm = [(f"{r[0]}|{r[1]}|{r[2]}", r[1], r[2], int(r[3] or 0), int(r[4] or 0),
+                  int(r[5] or 0), float(r[6] or 0)) for r in rail_rows]
 
     # upsert（每个模式先清后插，保留量最大的 200 条）
     def rebuild(mode, rows, reasons):
@@ -150,6 +175,7 @@ def refresh_carrier_performance(db, now):
     rebuild("sea", sea_norm, sea_reasons)
     rebuild("air", air_norm, air_reasons)
     rebuild("road", road_norm, road_reasons)
+    rebuild("rail", rail_norm, rail_reasons)
     db.commit()
 
     # 历史风险预测（Scenario 4: "this sailing runs late 60% of the time"）
@@ -183,13 +209,14 @@ def snapshot_metrics(db, now):
     from sea_freight_models import SeaException
     from air_cargo_models import AirException
     from road_freight_models import RoadException
+    from rail_freight_models import RailException
     from notification_models import ExceptionNotification
     from decision_models import ExceptionDecision
     from customer_models import CustomerContact
 
     snap = []
 
-    excs = {"sea": SeaException, "air": AirException, "road": RoadException}
+    excs = {"sea": SeaException, "air": AirException, "road": RoadException, "rail": RailException}
     for mode, cls in excs.items():
         total = db.query(cls).count()
         if total == 0:
@@ -239,9 +266,10 @@ def snapshot_metrics(db, now):
     from sea_freight_models import CargoLine
     from air_cargo_models import HouseWaybill
     from road_freight_models import ConsignmentLine
+    from rail_freight_models import RailConsignmentLine
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     penalty = 0.0
-    for cls in (CargoLine, HouseWaybill, ConsignmentLine):
+    for cls in (CargoLine, HouseWaybill, ConsignmentLine, RailConsignmentLine):
         rows = db.query(cls).filter(
             cls.is_sla_breached == True,
             cls.sla_deadline >= month_start,

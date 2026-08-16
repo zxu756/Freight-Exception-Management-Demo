@@ -111,6 +111,11 @@ TYPE_TO_ROOT_CAUSE = {
     "service_cancelled": "capacity-scheduling",
     "port_congestion": "traffic-infrastructure",
     "predicted_anomaly": "traffic-infrastructure",
+    "rail_delay": "traffic-infrastructure",
+    "track_closure": "traffic-infrastructure",
+    "mechanical_failure": "equipment-failure",
+    "weather_delay": "weather-natural",
+    "signal_failure": "technology-connectivity",
 }
 
 # delay_reason_code -> 10 类根因（细粒度覆盖）
@@ -172,6 +177,11 @@ DOWNSTREAM_IMPACT = {
     "service_cancelled": "rebooking -> delay -> SLA risk",
     "port_congestion": "berth delay -> discharge delay -> SLA risk",
     "predicted_anomaly": "potential congestion -> delay risk -> proactive monitoring",
+    "rail_delay": "missed slot -> delayed delivery -> SLA risk",
+    "track_closure": "line closed -> detour/replan -> delay -> SLA risk",
+    "mechanical_failure": "loco failure -> delay -> missed connection",
+    "weather_delay": "speed restriction -> delay -> SLA risk",
+    "signal_failure": "signal outage -> restricted running -> delay",
 }
 
 # exception_type -> 基础恢复成本（NZD，Task 11 直接成本）
@@ -182,6 +192,8 @@ RECOVERY_BASE_COST = {
     "dg_incident": 500, "overweight": 400, "lost": 2000, "failed_delivery": 150,
     "tracking_gap": 100, "breakdown": 800, "offload": 900, "driver_hours": 400,
     "service_cancelled": 900, "port_congestion": 600, "predicted_anomaly": 300,
+    "rail_delay": 500, "track_closure": 700, "mechanical_failure": 900,
+    "weather_delay": 450, "signal_failure": 350,
 }
 
 

@@ -39,6 +39,19 @@ class Settings(BaseSettings):
     road_sim_tick_seconds: float = 5.0     # Simulator thread tick interval (real seconds)
     road_sim_retention_hours: float = 48.0  # Data retention window (sim hours)
 
+    # Rail Freight Live Simulator
+    # 实时铁路模拟器（Scenario 4: road, rail and sea）
+    rail_sim_enabled: bool = True          # Start simulator on backend startup
+    rail_sim_speed: float = 60.0
+    rail_sim_tick_seconds: float = 5.0
+    rail_sim_retention_hours: float = 48.0
+
+    # 各方式订单量校准系数（订单总量目标 ~15-18k 票/月：陆 7k / 空 5k / 海 2.5k / 铁 2.5k）
+    road_scale: float = 0.15
+    air_scale: float = 0.3
+    sea_scale: float = 0.6
+    rail_scale: float = 1.0
+
     # PortConnect API (real NZ port vessel schedules)
     # PortConnect 新西兰港口船舶时刻表 API
     portconnect_api_enabled: bool = True   # Fetch real schedules at startup (falls back to local JSON)

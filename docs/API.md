@@ -838,3 +838,47 @@ risky_only=true 只返回准点率 ≤70% 且样本 ≥3 的高风险承运人�
 ---
 
 *本文档与代码同仓库维护（docs/API.md）。后端有字段新增时请同步更新。*
+---
+
+## 13. 铁路 rail（第 4 种运输方式）+ 校准与回写（新增）
+
+### 13.1 铁路端点（与其它三种方式对称）
+
+| 方法 & 路径 | 说明 |
+| --- | --- |
+| GET /rail/stations?island= | 10 个铁路车站（AKL/HLZ/TRG/MTM/NPL/PNM/WGN/CHC/DUD/IVC） |
+| GET /rail/segments | 线路区间实时状态（clear/slow/restricted/closed） |
+| GET /rail/services?status=&origin=&destination= | 班列（KR-xxxxx，含延误原因/分钟） |
+| GET /rail/consignments?route_type=&status=&customer_tier=&has_exception= | 托运单列表 |
+| GET /rail/consignments/{cn} | 托运单详情（车次/货物/事件/异常/票） |
+| GET /rail/consignments/{cn}/lines | 全部票（RailConsignmentLine） |
+| GET /rail/exceptions | 异常列表（rail_delay/track_closure/mechanical_failure/weather_delay/signal_failure） |
+| GET /rail/exceptions/{id} | 异常详情（含票级 cargo、联系人、决策、通知） |
+| POST /rail/exceptions/{id}/decision | 协调员审批（同 12.1） |
+| GET /rail/dashboard · /rail/kpi | 看板 / KPI |
+| GET /rail/notifications?limit= · /rail/live | 通知 / 实时（upcoming_departures/delayed_services） |
+| POST /rail/sim/control · /rail/env/event | 控制 / 注入事件（track_closure/signal/mechanical/weather） |
+| GET /rail/env/events | 线路异常事件 |
+
+铁路已接入世界内核：天气因果（暴雨/雪 → 线路封闭，含缓冲期预测，/world/predictions 会预报受影响班列）、承运人绩效（carrier_performance 含 rail）、指标快照（metric_snapshots 含 rail）、统一票视图（/world/tickets 含 rail）、客户目录与通知外发、决策学习（decision_stats）。
+
+### 13.2 TMS / 客户门户回写（Scenario 4: update the TMS automatically）
+
+**GET /api/world/tms-updates?limit=50** — 回写审计列表。
+
+**POST /api/world/tms-updates** — 手动登记一次回写：
+
+    { "mode": "sea", "exception_id": "EXC-SIM-...", "field": "eta",
+      "new_value": "2026-09-20 10:00", "reference": "CMAU...",
+      "target": "tms" }   // target: tms / portal / both；status 可选 applied/recorded/failed
+
+协调员每次决策（12.1）会自动登记一条 status→resolved 的 tms_updates 记录。
+
+### 13.3 订单量校准旋钮（config）
+
+- order_scale（全局 0.094）× road_scale 0.15 / air_scale 0.3 / sea_scale 0.6 / rail_scale 1.0 → 目标 ~15-18k 票/月（陆 ~7k / 空 ~5k / 海 ~2.5k / 铁 ~2.5k）；
+- 异常率 8-12% 目标：海运 vessel_delay 已按箱概率化（30%），避免一条船延误给全船开异常；
+- 重启幂等：海运按船期已生成箱则跳过、铁路班列 2 小时窗口去重，避免重复堆积；
+- 检测延迟 detection_latency_minutes 仅在触发事件 24h 内记录（>24h 视为无法判定，置空），指标快照只统计 0-1440 分钟区间。
+
+*本文档与代码同仓库维护（docs/API.md）。*

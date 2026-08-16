@@ -35,6 +35,7 @@ class WorldSimulator:
         from air_cargo_simulator import simulator as air
         from road_freight_simulator import simulator as road
         from sea_freight_simulator import simulator as sea
+        from rail_freight_simulator import simulator as rail
 
         self.engines = []
         if settings.air_sim_enabled:
@@ -46,6 +47,9 @@ class WorldSimulator:
         if settings.sea_sim_enabled:
             sea.start()
             self.engines.append(sea)
+        if settings.rail_sim_enabled:
+            rail.start()
+            self.engines.append(rail)
 
         self.running = True
         self._stop_event.clear()

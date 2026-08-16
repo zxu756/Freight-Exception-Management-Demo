@@ -16,7 +16,7 @@ const QUICK = [
   { key: 'clear', label: '晴', emoji: '☀️' },
 ];
 
-const MODE_LABEL: Record<string, string> = { sea: '海', road: '陆', air: '空' };
+const MODE_LABEL: Record<string, string> = { sea: '海', road: '陆', air: '空', rail: '铁' };
 
 const WorldControl = () => {
   const [clock, setClock] = useState<{ now: string; speed: number; paused: boolean }>({ now: '', speed: 60, paused: false });

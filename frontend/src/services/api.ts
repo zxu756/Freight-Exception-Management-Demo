@@ -9,13 +9,15 @@ const api = axios.create({
   },
 });
 
-// Live transport simulator API (air / road / sea)
+// Live transport simulator API (air / road / sea / rail)
 const normalizeLive = (data: any, tasksKey: string): TransportLiveData => ({
   simulator: data.simulator,
   tasks_total: data[tasksKey]?.total_in_db ?? 0,
   by_status: data[tasksKey]?.by_status ?? {},
   open_exceptions: data.open_exceptions ?? [],
   recent_events: data.recent_events ?? [],
+  upcoming_departures: data.upcoming_departures ?? [],
+  delayed_services: data.delayed_services ?? [],
 });
 
 const normalizeDashboard = (data: any): TransportDashboardData => data;
@@ -98,6 +100,49 @@ export const roadAPI = {
   },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/road/sim/control', { action, speed });
+    return response.data;
+  },
+};
+
+export const railAPI = {
+  getLive: async (): Promise<TransportLiveData> => {
+    const response = await api.get('/rail/live');
+    return normalizeLive(response.data, 'services');
+  },
+  getDashboard: async (): Promise<TransportDashboardData> => {
+    const response = await api.get('/rail/dashboard');
+    return normalizeDashboard(response.data);
+  },
+  getKpi: async () => {
+    const response = await api.get('/rail/kpi');
+    return response.data;
+  },
+  getSegments: async () => {
+    const response = await api.get('/rail/segments');
+    return response.data;
+  },
+  getEnvEvents: async () => {
+    const response = await api.get('/rail/env/events');
+    return response.data;
+  },
+  triggerEnvEvent: async (body: Record<string, unknown>) => {
+    const response = await api.post('/rail/env/event', body);
+    return response.data;
+  },
+  getException: async (exceptionId: string) => {
+    const response = await api.get(`/rail/exceptions/${exceptionId}`);
+    return response.data;
+  },
+  getLines: async (ref: string) => {
+    const response = await api.get(`/rail/consignments/${ref}/lines`);
+    return response.data;
+  },
+  decideException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/rail/exceptions/${exceptionId}/decision`, body);
+    return response.data;
+  },
+  control: async (action: string, speed?: number) => {
+    const response = await api.post('/rail/sim/control', { action, speed });
     return response.data;
   },
 };

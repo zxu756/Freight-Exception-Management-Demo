@@ -29,12 +29,19 @@ EVENT_TEMPLATES = {
         "weather": "{loc} 港区大风，船舶靠泊暂停",
         "ferry_cancelled": "{loc} 库克海峡大风，渡轮停航",
     },
+    "rail": {
+        "weather": "{loc} 铁路沿线暴雨，限速运行",
+        "track_closure": "{loc} 铁路线路封闭，班列停运绕行",
+        "signal": "{loc} 铁路信号故障，限速运行",
+        "mechanical": "{loc} 铁路机车故障，班列延误",
+    },
 }
 
 # 各运输方式的地点（用于随机生成事件）
 ROAD_LOCATIONS = ["AKL", "HLZ", "TRG", "WLG", "CHC", "GBM", "DUD", "ZQN", "NPE", "NPL"]
 AIR_LOCATIONS = ["AKL", "CHC", "WLG", "ZQN", "DUD", "NSN", "NPE", "HLZ", "TRG", "IVC"]
 SEA_LOCATIONS = ["NZAKL", "NZTRG", "NZWLG", "NZLYT", "NZTIU"]
+RAIL_LOCATIONS = ["AKL", "HLZ", "TRG", "MTM", "NPL", "PNM", "WGN", "CHC", "DUD", "IVC"]
 
 
 def generate_event(db, mode, location, now):

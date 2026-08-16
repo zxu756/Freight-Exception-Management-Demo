@@ -43,6 +43,24 @@ class DecisionStat(Base):
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class TmsUpdate(Base):
+    """TMS / customer portal write-back audit rows (Scenario 4: update TMS automatically)."""
+    __tablename__ = "tms_updates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    update_id = Column(String(50), unique=True, nullable=False, index=True)
+    mode = Column(String(10), nullable=False, index=True)  # sea/air/road/rail
+    exception_id = Column(String(50), nullable=False, index=True)
+    reference = Column(String(50), nullable=True)  # 单据号
+    target = Column(String(20), nullable=False, default="tms")  # tms / portal / both
+    field = Column(String(50), nullable=False)  # status / eta / action
+    old_value = Column(String(200), nullable=True)
+    new_value = Column(String(200), nullable=False)
+    status = Column(String(20), nullable=False, default="recorded")  # recorded / applied / failed
+    applied_at = Column(DateTime, nullable=True)  # 模拟世界时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def apply_learned_preferences(db, category):
     """把历史协调员偏好转成排序加分：{action: bonus}
 
@@ -69,6 +87,9 @@ def _exception_model(mode):
     if mode == "road":
         from road_freight_models import RoadException
         return RoadException
+    if mode == "rail":
+        from rail_freight_models import RailException
+        return RailException
     raise ValueError(f"unknown mode: {mode}")
 
 
@@ -108,8 +129,19 @@ def record_decision(db, mode, exception_id, body, now):
     db.add(row)
 
     # 更新异常：已解决 + 实际执行结果（Scenario 4: 行动执行留痕）
+    _prev_status = exc.status
     exc.status = "resolved"
     exc.resolved_at = now
+    # TMS / 客户门户自动回写审计（Scenario 4: update the TMS and customer portal automatically）
+    _ref = (getattr(exc, "container_number", None) or getattr(exc, "awb_number", None)
+            or getattr(exc, "consignment_number", None))
+    db.add(TmsUpdate(
+        update_id=f"TMS-{uuid.uuid4().hex[:10]}",
+        mode=mode, exception_id=exception_id, reference=_ref,
+        target="tms", field="status",
+        old_value=_prev_status, new_value="resolved",
+        status="applied", applied_at=now,
+    ))
     if chosen:
         exc.actual_action = chosen
         exc.actual_cost = body.get("actual_cost") or ACTION_COST.get(chosen, exc.recovery_cost or 200)

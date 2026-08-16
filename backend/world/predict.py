@@ -86,6 +86,17 @@ def _predict_for_event(db, ev, now):
             if ev.location != x.port_code:
                 continue
             _record(db, ev, 'sea', x.vessel_visit_id, ev.location, delay, now)
+    elif ev.mode == 'rail':
+        from rail_freight_models import RailService
+        cands = db.query(RailService).filter(
+            RailService.scheduled_departure >= lo,
+            RailService.scheduled_departure <= hi,
+            RailService.status.in_(['scheduled', 'loading', 'in_transit']),
+        ).all()
+        for x in cands:
+            if ev.location not in (x.origin, x.destination):
+                continue
+            _record(db, ev, 'rail', x.train_number, ev.location, delay, now)
 
 
 def _record(db, ev, mode, reference, location, delay, now):

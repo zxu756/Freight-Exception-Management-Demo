@@ -156,6 +156,9 @@ export interface TransportLiveData {
   by_status: Record<string, number>;
   open_exceptions: LiveExceptionItem[];
   recent_events: LiveEventItem[];
+  // rail-specific extras (only populated for rail live; empty for air/road/sea)
+  upcoming_departures?: Record<string, unknown>[];
+  delayed_services?: Record<string, unknown>[];
 }
 
 export interface TransportDashboardData {

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Ship, Truck, Plane, Pause, Play, CloudRain, Route, Globe } from 'lucide-react';
-import { airAPI, roadAPI, seaAPI } from '../services/api';
+import { Ship, Truck, Plane, TrainFront, Pause, Play, CloudRain, Route, Globe } from 'lucide-react';
+import { airAPI, roadAPI, seaAPI, railAPI } from '../services/api';
 import type { TransportLiveData, TransportDashboardData } from '../types';
 
 interface ModeData {
@@ -10,12 +10,13 @@ interface ModeData {
   kpi: Record<string, unknown> | null;
 }
 
-type ModeKey = 'air' | 'road' | 'sea';
+type ModeKey = 'air' | 'road' | 'sea' | 'rail';
 
 const MODES: Record<ModeKey, { label: string; icon: typeof Ship; color: string; api: typeof airAPI }> = {
   sea: { label: '海运 Sea Freight', icon: Ship, color: 'text-blue-600', api: seaAPI },
   road: { label: '陆运 Road Freight', icon: Truck, color: 'text-amber-600', api: roadAPI },
   air: { label: '空运 Air Cargo', icon: Plane, color: 'text-sky-600', api: airAPI },
+  rail: { label: '铁路 Rail Freight', icon: TrainFront, color: 'text-violet-600', api: railAPI },
 };
 
 const riskColor = (risk: string) => {
@@ -272,9 +273,11 @@ const LiveDashboard = () => {
     air: { live: null, dashboard: null, kpi: null },
     road: { live: null, dashboard: null, kpi: null },
     sea: { live: null, dashboard: null, kpi: null },
+    rail: { live: null, dashboard: null, kpi: null },
   });
-  const [envEvents, setEnvEvents] = useState<Record<ModeKey, any[]>>({ air: [], road: [], sea: [] });
+  const [envEvents, setEnvEvents] = useState<Record<ModeKey, any[]>>({ air: [], road: [], sea: [], rail: [] });
   const [segments, setSegments] = useState<any[]>([]);
+  const [railSegments, setRailSegments] = useState<any[]>([]);
   const [error, setError] = useState(false);
   const [clock, setClock] = useState('');
   // 手动触发事件表单
@@ -285,18 +288,21 @@ const LiveDashboard = () => {
 
   const load = useCallback(async () => {
     try {
-      const [airLive, airDash, airKpi, airEnv, roadLive, roadDash, roadKpi, roadEnv, roadSeg, seaLive, seaDash, seaKpi, seaEnv] = await Promise.all([
+      const [airLive, airDash, airKpi, airEnv, roadLive, roadDash, roadKpi, roadEnv, roadSeg, seaLive, seaDash, seaKpi, seaEnv, railLive, railDash, railKpi, railEnv, railSeg] = await Promise.all([
         airAPI.getLive(), airAPI.getDashboard(), airAPI.getKpi(), airAPI.getEnvEvents(),
         roadAPI.getLive(), roadAPI.getDashboard(), roadAPI.getKpi(), roadAPI.getEnvEvents(), roadAPI.getSegments(),
         seaAPI.getLive(), seaAPI.getDashboard(), seaAPI.getKpi(), seaAPI.getEnvEvents(),
+        railAPI.getLive(), railAPI.getDashboard(), railAPI.getKpi(), railAPI.getEnvEvents(), railAPI.getSegments(),
       ]);
       setData({
         air: { live: airLive, dashboard: airDash, kpi: airKpi },
         road: { live: roadLive, dashboard: roadDash, kpi: roadKpi },
         sea: { live: seaLive, dashboard: seaDash, kpi: seaKpi },
+        rail: { live: railLive, dashboard: railDash, kpi: railKpi },
       });
-      setEnvEvents({ air: airEnv.events ?? [], road: roadEnv.events ?? [], sea: seaEnv.events ?? [] });
+      setEnvEvents({ air: airEnv.events ?? [], road: roadEnv.events ?? [], sea: seaEnv.events ?? [], rail: railEnv.events ?? [] });
       setSegments(roadSeg.segments ?? []);
+      setRailSegments(railSeg.segments ?? []);
       setClock(seaLive.simulator.sim_now);
       setError(false);
     } catch (e) {
@@ -329,7 +335,7 @@ const LiveDashboard = () => {
           <div>
             <h1 className="text-xl font-bold text-gray-900">实时货运网络监控</h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              海 · 陆 · 空实时模拟器 (每 3 秒刷新)
+              海 · 陆 · 空 · 铁实时模拟器 (每 3 秒刷新)
               {clock && <span className="ml-2 font-mono text-xs">sim {clock.slice(11, 19)}</span>}
             </p>
           </div>
@@ -353,20 +359,32 @@ const LiveDashboard = () => {
               <CloudRain className="w-5 h-5 text-blue-600" /> 环境事件 · 实时路况通报
             </h2>
             <div className="flex items-center gap-2 text-xs">
-              <select value={triggerMode} onChange={(e) => setTriggerMode(e.target.value as ModeKey)} className="border rounded px-2 py-1">
+              <select value={triggerMode} onChange={(e) => { const m = e.target.value as ModeKey; setTriggerMode(m); if (m === 'rail') setTriggerType('weather'); }} className="border rounded px-2 py-1">
                 <option value="road">陆运</option>
                 <option value="sea">海运</option>
                 <option value="air">空运</option>
+                <option value="rail">铁路</option>
               </select>
               <input value={triggerLoc} onChange={(e) => setTriggerLoc(e.target.value)} className="border rounded px-2 py-1 w-20" placeholder="地点" />
               <select value={triggerType} onChange={(e) => setTriggerType(e.target.value)} className="border rounded px-2 py-1">
-                <option value="weather">暴雨</option>
-                <option value="road_closure">封路</option>
-                <option value="accident">事故</option>
-                <option value="port_congestion">港口拥堵</option>
-                <option value="fog">大雾</option>
-                <option value="snow">积雪</option>
-                <option value="ferry_cancelled">渡轮停航</option>
+                {triggerMode === 'rail' ? (
+                  <>
+                    <option value="track_closure">线路封闭</option>
+                    <option value="signal">信号故障</option>
+                    <option value="mechanical">机械故障</option>
+                    <option value="weather">恶劣天气</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="weather">暴雨</option>
+                    <option value="road_closure">封路</option>
+                    <option value="accident">事故</option>
+                    <option value="port_congestion">港口拥堵</option>
+                    <option value="fog">大雾</option>
+                    <option value="snow">积雪</option>
+                    <option value="ferry_cancelled">渡轮停航</option>
+                  </>
+                )}
               </select>
               <select value={triggerSev} onChange={(e) => setTriggerSev(e.target.value)} className="border rounded px-2 py-1">
                 <option value="minor">轻微</option>
@@ -386,7 +404,7 @@ const LiveDashboard = () => {
               envEvents[m].map((e: any) => ({ ...e, mode: m }))
             ).map((e: any) => (
               <span key={`${e.mode}-${e.location}-${e.event_type}`} className="inline-flex items-center gap-1.5 text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                <span className="font-medium text-amber-800">{e.mode === 'road' ? '陆' : e.mode === 'sea' ? '海' : '空'} {e.location}</span>
+                <span className="font-medium text-amber-800">{e.mode === 'road' ? '陆' : e.mode === 'sea' ? '海' : e.mode === 'air' ? '空' : '铁'} {e.location}</span>
                 <span className="text-gray-600">{e.description}</span>
                 <span className="text-gray-400">({e.severity})</span>
               </span>
@@ -430,10 +448,100 @@ const LiveDashboard = () => {
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        {/* 铁运网络（铁路） */}
+        <div className="bg-white rounded-xl border border-gray-200 p-4 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+              <TrainFront className="w-5 h-5 text-violet-600" /> 铁运网络 · 班列 / 路况 / 货物
+            </h2>
+            <div className="flex items-center gap-3 text-xs">
+              {(['clear', 'slow', 'restricted', 'closed'] as const).map((c) => {
+                const n = railSegments.filter((s) => s.condition === c).length;
+                if (!n) return null;
+                const color = { clear: 'bg-green-400', slow: 'bg-yellow-400', restricted: 'bg-orange-400', closed: 'bg-red-400' }[c];
+                const label = { clear: '畅通', slow: '缓行', restricted: '限速', closed: '封闭' }[c];
+                return (
+                  <span key={c} className="flex items-center gap-1 text-gray-600">
+                    <span className={`w-2 h-2 rounded-full ${color}`} /> {label} {n}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {/* 线路状态 */}
+            <div>
+              <p className="text-xs font-medium text-gray-500 mb-1.5">线路状态</p>
+              <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
+                {railSegments.filter((s) => s.condition !== 'clear').map((s) => (
+                  <span key={`${s.origin}-${s.destination}`} className="inline-flex items-center gap-1 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                    <span className={`w-2 h-2 rounded-full ${{ clear: 'bg-green-400', slow: 'bg-yellow-400', restricted: 'bg-orange-400', closed: 'bg-red-400' }[s.condition as string]}`} />
+                    <span className="font-medium text-gray-700">{s.origin}→{s.destination}</span>
+                    <span className="text-gray-500">{s.description}</span>
+                  </span>
+                ))}
+                {railSegments.filter((s) => s.condition !== 'clear').length === 0 && (
+                  <span className="text-xs text-gray-400">全线畅通</span>
+                )}
+              </div>
+            </div>
+
+            {/* 即将发车 */}
+            {(data.rail.live?.upcoming_departures?.length ?? 0) > 0 && (
+              <div>
+                <p className="text-xs font-medium text-gray-500 mb-1.5">即将发车 ({(data.rail.live?.upcoming_departures ?? []).length})</p>
+                <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
+                  {(data.rail.live?.upcoming_departures ?? []).slice(0, 10).map((t: any) => (
+                    <span key={t.train_number} className="inline-flex items-center gap-1.5 text-xs bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                      <span className="font-medium text-gray-800">{t.train_number}</span>
+                      <span className="text-gray-400">{t.operator}</span>
+                      <span className="text-gray-700">{t.origin}→{t.destination}</span>
+                      <span className="text-gray-400">{t.scheduled_departure?.slice(11, 16)}</span>
+                      {t.delay_minutes ? <span className="text-amber-600">+{t.delay_minutes}min {t.delay_reason_code}</span> : <span className="text-green-600">准点</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 延误班列 */}
+            {(data.rail.live?.delayed_services?.length ?? 0) > 0 && (
+              <div>
+                <p className="text-xs font-medium text-gray-500 mb-1.5">延误班列 ({(data.rail.live?.delayed_services ?? []).length})</p>
+                <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
+                  {(data.rail.live?.delayed_services ?? []).slice(0, 10).map((t: any) => (
+                    <span key={t.train_number} className="inline-flex items-center gap-1.5 text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      <span className="font-medium text-amber-800">{t.train_number}</span>
+                      <span className="text-gray-700">{t.origin}→{t.destination}</span>
+                      <span className="text-amber-700">延误 {t.delay_minutes}min</span>
+                      <span className="text-gray-400">{t.delay_reason_code}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 货物统计 */}
+            {((data.rail.dashboard?.consignments as any)?.total ?? 0) > 0 && (
+              <div>
+                <p className="text-xs font-medium text-gray-500 mb-1.5">货物统计</p>
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+                  <span>总运单 <b className="text-gray-900">{(data.rail.dashboard?.consignments as any)?.total}</b></span>
+                  <span>多式联运 <b>{(data.rail.dashboard?.consignments as any)?.intermodal}</b></span>
+                  <span>大宗 <b>{(data.rail.dashboard?.consignments as any)?.bulk}</b></span>
+                  <span>普货 <b>{(data.rail.dashboard?.consignments as any)?.general}</b></span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
           <TransportPanel mode="sea" data={data.sea} />
           <TransportPanel mode="road" data={data.road} />
           <TransportPanel mode="air" data={data.air} />
+          <TransportPanel mode="rail" data={data.rail} />
         </div>
       </main>
     </div>

@@ -184,6 +184,16 @@ class SeaFreightSimulator:
             ).order_by(SeaException.exception_id.desc()).first()
             self._exc_counter = (int(exc_row[0].split("-")[2]) + 1) if exc_row else 1
 
+            # 通知号也按同计数前缀（NTF-SEA-xxxxx）：保留期清理可能删掉异常行，
+            # 但通知行还在 —— 用两者最大值续号，避免 notification_id 撞唯一约束
+            from notification_models import ExceptionNotification as _EN
+            ntf_row = db.query(_EN.notification_id).filter(
+                _EN.mode == "sea",
+                _EN.notification_id.like("NTF-SEA-%"),
+            ).order_by(_EN.notification_id.desc()).first()
+            if ntf_row:
+                self._exc_counter = max(self._exc_counter, int(ntf_row[0].split("-")[2]) + 1)
+
             # container counter from max numeric suffix
             rows = db.query(SeaContainer.container_number).all()
             max_num = 0
@@ -267,6 +277,11 @@ class SeaFreightSimulator:
         if visit.vessel_visit_id in self._generated_vessels:
             return
         self._generated_vessels.add(visit.vessel_visit_id)
+        # 重启幂等：该船期已生成过集装箱则跳过（避免每次重启重复生成、量级膨胀）
+        existing = db.query(SeaContainer.container_number).filter(
+            SeaContainer.vessel_visit_id == visit.vessel_visit_id).first()
+        if existing:
+            return
         # 暂只做进口（往新西兰走）：出口/沿海航段不生成货物
         prev_intl = not self._is_nz_port_name(visit.previous_port)
         next_intl = not self._is_nz_port_name(visit.next_port)
@@ -288,7 +303,7 @@ class SeaFreightSimulator:
                 visit.delay_reason_code = random.choice(["berth_unavailable", "labour", "mechanical"])
             if visit.delay_minutes and visit.departure_datetime:
                 visit.departure_datetime += timedelta(minutes=visit.delay_minutes)
-        n = max(1, int(random.randint(20, 60) * settings.order_scale))
+        n = max(1, int(random.randint(20, 60) * settings.order_scale * settings.sea_scale))
         for _ in range(n):
             self._create_container(db, visit)
         db.commit()
@@ -390,7 +405,7 @@ class SeaFreightSimulator:
                 sla_grace_deadline=_dl + timedelta(hours=_lp["grace_hours"]),
             ))
 
-        if visit.delay_minutes > 0:
+        if visit.delay_minutes > 0 and random.random() < 0.3:
             self._create_exception(
                 db, container, "vessel_delay",
                 f"Vessel {visit.vessel_name} delayed {visit.delay_minutes} minutes ({visit.delay_reason_code})",
@@ -496,7 +511,10 @@ class SeaFreightSimulator:
         heapq.heappush(self._pending, (sim_time, self._pending_seq, kind, payload))
 
     def _process_pending(self, db):
-        while self._pending and self._pending[0][0] <= self.sim_now:
+        # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
+        budget = 300
+        while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
+            budget -= 1
             _, _, kind, payload = heapq.heappop(self._pending)
             try:
                 handler = getattr(self, f"_on_{kind}")

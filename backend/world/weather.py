@@ -305,6 +305,11 @@ class WeatherEngine:
                 return {"level": "severe", "reason": "大风，船舶靠泊暂停"}
             if cond == "heavy_rain":
                 return {"level": "caution", "reason": "港区大雨，作业放缓"}
+        elif mode == "rail":
+            if cond in ("storm", "heavy_rain", "snow"):
+                return {"level": "severe", "reason": "恶劣天气，线路封闭风险，班列停运/绕行"}
+            if cond in ("rain", "windy", "fog"):
+                return {"level": "caution", "reason": "天气影响，班列限速运行"}
         return {"level": "clear", "reason": "天气正常"}
 
 

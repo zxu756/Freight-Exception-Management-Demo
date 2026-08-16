@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Search, Brain, MousePointerClick, Scale, Package, Bell } from 'lucide-react';
-import { airAPI, roadAPI, seaAPI } from '../services/api';
+import { airAPI, roadAPI, seaAPI, railAPI } from '../services/api';
 
-const APIS: Record<string, typeof airAPI> = { sea: seaAPI, road: roadAPI, air: airAPI };
+const APIS: Record<string, typeof airAPI> = { sea: seaAPI, road: roadAPI, air: airAPI, rail: railAPI };
 
 const riskColor = (risk: string | undefined) => {
   switch (risk) {
@@ -94,7 +94,7 @@ const ExceptionDetail = () => {
   // 票级异常：加载同箱/同单/同主单的全部票做对比（海运/陆运用票号，空运用分运单号）
   const lineNumber = data?.cargo?.line_number;
   const hawbNumber = data?.cargo?.hawb_number;
-  const refNumber = data?.cargo?.container_number ?? data?.cargo?.awb_number;
+  const refNumber = data?.cargo?.container_number ?? data?.cargo?.awb_number ?? data?.cargo?.consignment_number;
   const hasTicket = !!(lineNumber || hawbNumber);
   useEffect(() => {
     if (!data || !hasTicket || !refNumber || !mode) { setSiblingLines(null); return; }

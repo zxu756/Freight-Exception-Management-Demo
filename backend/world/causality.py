@@ -9,22 +9,22 @@ weather -> delay -> exception -> notification holds end to end.
 import time as _time
 from datetime import timedelta
 
-from environment_events import AIR_LOCATIONS, ROAD_LOCATIONS, SEA_LOCATIONS
+from environment_events import AIR_LOCATIONS, ROAD_LOCATIONS, SEA_LOCATIONS, RAIL_LOCATIONS
 from environment_models import EnvironmentEvent
 from database import SessionLocal, WRITE_LOCK
 from world.weather import weather_engine
 
-LOCATIONS_BY_MODE = {"air": AIR_LOCATIONS, "road": ROAD_LOCATIONS, "sea": SEA_LOCATIONS}
+LOCATIONS_BY_MODE = {"air": AIR_LOCATIONS, "road": ROAD_LOCATIONS, "sea": SEA_LOCATIONS, "rail": RAIL_LOCATIONS}
 
 # weather condition -> per-mode event_type (None = no operational event)
 WEATHER_EVENT_TYPE = {
-    "fog":        {"air": "fog", "road": "weather", "sea": None},
-    "snow":       {"air": "snow", "road": "weather", "sea": None},
-    "storm":      {"air": "weather", "road": "weather", "sea": "weather"},
-    "heavy_rain": {"air": "weather", "road": "weather", "sea": "weather"},
-    "rain":       {"air": "weather", "road": "weather", "sea": "weather"},
-    "showers":    {"air": "weather", "road": "weather", "sea": None},
-    "windy":      {"air": "weather", "road": None, "sea": "weather"},
+    "fog":        {"air": "fog", "road": "weather", "sea": None, "rail": "weather"},
+    "snow":       {"air": "snow", "road": "weather", "sea": None, "rail": "track_closure"},
+    "storm":      {"air": "weather", "road": "weather", "sea": "weather", "rail": "track_closure"},
+    "heavy_rain": {"air": "weather", "road": "weather", "sea": "weather", "rail": "track_closure"},
+    "rain":       {"air": "weather", "road": "weather", "sea": "weather", "rail": "weather"},
+    "showers":    {"air": "weather", "road": "weather", "sea": None, "rail": None},
+    "windy":      {"air": "weather", "road": None, "sea": "weather", "rail": "weather"},
 }
 
 # 天气类型 → 缓冲期（小时范围）：事件从"开始"到"实际影响班次"之间的预测窗口。
@@ -86,6 +86,11 @@ def build_description(mode, loc, weather):
             return f"{city}港区大雨，作业放缓"
         if cond == "rain":
             return f"{city}港区降雨，作业放缓"
+    if mode == "rail":
+        if cond in ("storm", "heavy_rain", "snow"):
+            return f"{loc} 铁路沿线{label}，线路封闭风险，班列停运或绕行"
+        if cond in ("rain", "windy", "fog"):
+            return f"{loc} 铁路沿线{label}，限速运行"
     return f"{loc} {label}"
 
 

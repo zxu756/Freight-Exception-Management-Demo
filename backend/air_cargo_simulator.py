@@ -371,6 +371,16 @@ class AirCargoSimulator:
             ).order_by(AirException.exception_id.desc()).first()
             self._exc_counter = (int(exc_row[0].split("-")[2]) + 1) if exc_row else 1
 
+            # 通知号也按同计数前缀（NTF-AIR-xxxxx）：保留期清理可能删掉异常行，
+            # 但通知行还在 —— 用两者最大值续号，避免 notification_id 撞唯一约束
+            from notification_models import ExceptionNotification as _EN
+            ntf_row = db.query(_EN.notification_id).filter(
+                _EN.mode == "air",
+                _EN.notification_id.like("NTF-AIR-%"),
+            ).order_by(_EN.notification_id.desc()).first()
+            if ntf_row:
+                self._exc_counter = max(self._exc_counter, int(ntf_row[0].split("-")[2]) + 1)
+
             insp_row = db.query(AirCustomsInspection.inspection_id).filter(
                 AirCustomsInspection.inspection_id.like("INS-SIM-%")
             ).order_by(AirCustomsInspection.inspection_id.desc()).first()
@@ -382,7 +392,7 @@ class AirCargoSimulator:
         routes = DOMESTIC_ROUTES + INTL_ROUTES
         for org, dst, freq, airline, ac, freight in routes:
             key = (org, dst, airline)
-            interval = 1440.0 / (freq * settings.order_scale)
+            interval = 1440.0 / (freq * settings.order_scale * settings.air_scale)
             first = self.sim_now - timedelta(hours=6)
             self._route_next_dep[key] = first + timedelta(minutes=random.uniform(0, interval))
 
@@ -392,7 +402,7 @@ class AirCargoSimulator:
             org, dst, airline = key
             freq = next(r[2] for r in DOMESTIC_ROUTES + INTL_ROUTES
                         if r[0] == org and r[1] == dst and r[3] == airline)
-            interval = 1440.0 / (freq * settings.order_scale)
+            interval = 1440.0 / (freq * settings.order_scale * settings.air_scale)
             while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
                 if not self._flight_conflicts(org, dst, airline, self._route_next_dep[key]):
                     self._create_flight(org, dst, airline, dep=self._route_next_dep[key])
@@ -542,7 +552,9 @@ class AirCargoSimulator:
         routes = DOMESTIC_ROUTES + INTL_ROUTES
         for org, dst, freq, airline, ac, freight in routes:
             key = (org, dst, airline)
-            interval = 1440.0 / (freq * settings.order_scale)
+            interval = 1440.0 / (freq * settings.order_scale * settings.air_scale)
+            if self._route_next_dep[key] < self.sim_now - timedelta(hours=6):
+                self._route_next_dep[key] = self.sim_now - timedelta(minutes=30)
             while self._route_next_dep[key] < self.sim_now + timedelta(hours=12):
                 if not self._flight_conflicts(org, dst, airline, self._route_next_dep[key]):
                     self._create_flight(org, dst, airline, dep=self._route_next_dep[key])
@@ -819,7 +831,10 @@ class AirCargoSimulator:
         heapq.heappush(self._pending, (sim_time, self._pending_seq, kind, payload))
 
     def _process_pending(self, db):
-        while self._pending and self._pending[0][0] <= self.sim_now:
+        # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
+        budget = 300
+        while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
+            budget -= 1
             _, _, kind, payload = heapq.heappop(self._pending)
             try:
                 handler = getattr(self, f"_on_{kind}")
@@ -1286,9 +1301,13 @@ class AirCargoSimulator:
         ).all()
         if old_waybills:
             awbs = [w.awb_number for w in old_waybills]
-            db.query(AirException).filter(AirException.awb_number.in_(awbs)).delete(synchronize_session=False)
-            db.query(AirCustomsInspection).filter(AirCustomsInspection.awb_number.in_(awbs)).delete(synchronize_session=False)
-            db.query(AirTrackingEvent).filter(AirTrackingEvent.awb_number.in_(awbs)).delete(synchronize_session=False)
+            # 分块删除（SQLite 单条 IN 最多 999 参数）；先删分单避免 FK SET NULL 巨量 UPDATE
+            for i in range(0, len(awbs), 500):
+                chunk = awbs[i:i + 500]
+                db.query(HouseWaybill).filter(HouseWaybill.awb_number.in_(chunk)).delete(synchronize_session=False)
+                db.query(AirException).filter(AirException.awb_number.in_(chunk)).delete(synchronize_session=False)
+                db.query(AirCustomsInspection).filter(AirCustomsInspection.awb_number.in_(chunk)).delete(synchronize_session=False)
+                db.query(AirTrackingEvent).filter(AirTrackingEvent.awb_number.in_(chunk)).delete(synchronize_session=False)
             for w in old_waybills:
                 db.delete(w)
         old_flights = db.query(AirFlight).filter(

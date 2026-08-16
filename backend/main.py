@@ -10,6 +10,7 @@ from config import settings
 from database import engine, Base
 import air_cargo_models  # noqa: F401  # Register air cargo tables on Base.metadata
 import road_freight_models  # noqa: F401  # Register road freight tables on Base.metadata
+import rail_freight_models  # noqa: F401  # Register rail freight tables on Base.metadata
 import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.metadata
 import notification_models  # noqa: F401  # Register customer notification table
 import customer_models  # noqa: F401  # Register customer master data table
@@ -243,11 +244,12 @@ async def health_check():
 
 
 # Import and include routers
-from routers import air_cargo, road_freight, sea_freight, ask, world
+from routers import air_cargo, road_freight, sea_freight, rail_freight, ask, world
 
 app.include_router(air_cargo.router, prefix=settings.api_prefix, tags=["air_cargo"])
 app.include_router(road_freight.router, prefix=settings.api_prefix, tags=["road_freight"])
 app.include_router(sea_freight.router, prefix=settings.api_prefix, tags=["sea_freight"])
+app.include_router(rail_freight.router, prefix=settings.api_prefix, tags=["rail_freight"])
 app.include_router(ask.router, prefix=settings.api_prefix, tags=["ask"])
 app.include_router(world.router, prefix=settings.api_prefix, tags=["world"])
 
