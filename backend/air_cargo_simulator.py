@@ -29,6 +29,7 @@ from config import settings
 from event_classifier import classifier, map_exception_to_categories, DOWNSTREAM_IMPACT, estimate_recovery_cost, select_best_recovery, recovery_options_json
 from notification_models import ExceptionNotification, build_customer_notification
 from customer_models import get_customer_contact
+from decision_models import apply_learned_preferences
 from llm_client import enhance_diagnosis
 from sla_models import get_policy, determine_breach, estimate_penalty, map_service_level_to_tier, is_excused, evaluate_breach
 from environment_events import generate_event, get_active_events_for_route
@@ -1122,7 +1123,17 @@ class AirCargoSimulator:
         category, root_cause_cat = map_exception_to_categories(exc_type, reason_code)
         impact = DOWNSTREAM_IMPACT.get(exc_type, "delay -> SLA risk")
         cost = estimate_recovery_cost(exc_type, _value)
-        best_action, action_reason = select_best_recovery(category, _value, _tier, recovery)
+        learned = apply_learned_preferences(db, category)
+        trigger_event_id = None
+        detection_latency = None
+        _ev = db.query(AirTrackingEvent).filter(
+            AirTrackingEvent.awb_number == waybill.awb_number,
+            AirTrackingEvent.timestamp <= self.sim_now,
+        ).order_by(AirTrackingEvent.timestamp.desc()).first()
+        if _ev and (self.sim_now - _ev.timestamp) <= timedelta(hours=24):
+            trigger_event_id = _ev.event_id
+            detection_latency = round((self.sim_now - _ev.timestamp).total_seconds() / 60.0, 1)
+        best_action, action_reason = select_best_recovery(category, _value, _tier, recovery, learned)
         if cls["is_ood"] and settings.llm_enabled:
             diagnosis = enhance_diagnosis(exc_type, root_cause, diagnosis)
         if cls["is_ood"]:
@@ -1145,7 +1156,9 @@ class AirCargoSimulator:
             ai_confidence=round(random.uniform(0.85, 0.98), 2),
             status=_status,
             requires_human_approval=_requires,
-            recovery_options=recovery_options_json(category, _value, _tier, recovery),
+            recovery_options=recovery_options_json(category, _value, _tier, recovery, learned),
+            trigger_event_id=trigger_event_id,
+            detection_latency_minutes=detection_latency,
             delay_hours=delay_hours,
             business_section=cls["business_section"],
             classification_confidence=cls["classification_confidence"],
@@ -1198,6 +1211,15 @@ class AirCargoSimulator:
     def _create_predicted_exception(self, db, waybill, anomaly, transition):
         """Create a predictive anomaly exception from a dwell-time outlier."""
         best_action, action_reason = select_best_recovery(None, None, None, ["monitor", "upgrade_priority"])
+        trigger_event_id = None
+        detection_latency = None
+        _ev = db.query(AirTrackingEvent).filter(
+            AirTrackingEvent.awb_number == waybill.awb_number,
+            AirTrackingEvent.timestamp <= self.sim_now,
+        ).order_by(AirTrackingEvent.timestamp.desc()).first()
+        if _ev and (self.sim_now - _ev.timestamp) <= timedelta(hours=24):
+            trigger_event_id = _ev.event_id
+            detection_latency = round((self.sim_now - _ev.timestamp).total_seconds() / 60.0, 1)
         exc = AirException(
             exception_id=f"EXC-SIM-{self._exc_counter:06d}",
             awb_number=waybill.awb_number,
@@ -1214,6 +1236,8 @@ class AirCargoSimulator:
             recovery_options=recovery_options_json(None, None, None, ["monitor", "upgrade_priority"]),
             recommended_action=best_action,
             recommendation_reason=action_reason,
+            trigger_event_id=trigger_event_id,
+            detection_latency_minutes=detection_latency,
             delay_hours=0.0,
             business_section="Time & Service Disruption",
             classification_decision="human_review",

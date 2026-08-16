@@ -697,7 +697,7 @@ clear / cloudy / showers / rain / heavy_rain / storm / fog / snow / windy。
 
 要点：
 
-- 系统**只生成通知、不真实外发**，外发状态需要你们自己记录；
+- 系统**只生成通知、不真实外发**；外发后请回写 POST /api/notifications/{notification_id}/delivery（status + external_message_id），系统的指标快照会统计外发积压（notifications_pending_send）；
 - `notification_id` 全局唯一（NTF-SEA/AIR/ROAD-xxx），天然适合做幂等去重；
 - `sent_at` 是模拟时间；按返回顺序（sent_at 降序）处理即可；
 - 世界时钟 60x 时数据增长快，建议把 limit 调大或缩短轮询间隔；处理慢时优先处理最新（列表已按 sent_at 降序）。
@@ -756,3 +756,85 @@ A：可以（SQLite 单文件，WAL 模式），但不保证表结构稳定；�
 ---
 
 *文档与代码同仓库维护（docs/API.md）。后端有字段新增时请同步更新本文档。*
+---
+
+## 12. Scenario 4 数据闭环（P0/P1/P2 新增）
+
+### 12.1 协调员决策（审批 + 学习）
+
+**POST /api/{mode}/exceptions/{exception_id}/decision** — 记录协调员对 AI 建议的审批/驳回/修改，异常随即标记为 resolved 并写入实际执行结果。
+
+请求体：
+
+    {
+      "decided_by": "Coordinator Alice",   // 决策人，默认 Coordinator
+      "decision": "approve",               // approve / modify / reject
+      "chosen_action": "submit_documents", // modify 时必填；approve 缺省用 recommended_action；reject 忽略
+      "note": "现场确认可行",               // 可选
+      "actual_cost": 120,                    // 可选，缺省按行动标准成本
+      "actual_recovery_hours": 2.5           // 可选，缺省按行动预计挽回小时
+    }
+
+响应：
+
+    {
+      "success": true,
+      "decision": { "decision_id": "DEC-2c58d8db2e", "decided_by": "...",
+        "decision": "approve", "chosen_action": "...",
+        "decision_latency_minutes": 18057.8, "decided_at": "..." },
+      "exception": { "exception_id": "...", "status": "resolved",
+        "actual_action": "...", "actual_cost": 100.0,
+        "actual_recovery_hours": 2.0, "resolved_at": "..." }
+    }
+
+**学习机制**：每次决策更新 decision_stats（分类 × 行动的采纳/驳回计数）；后续同一分类的新异常，被协调员多次采纳的行动会在 AI 排序里获得最多 +1.5 的偏好加分（recovery_options 的 why 里会注明），推荐逐渐向协调员实际偏好收敛。
+
+异常详情端点新增字段：trigger_event_id（触发该异常的那条追踪事件）、detection_latency_minutes（事件→检测的分钟数，仅当触发事件在 24h 内才记录）、actual_action / actual_cost / actual_recovery_hours / resolved_at、decisions（决策历史数组）。
+
+### 12.2 通知外发回写
+
+**POST /api/notifications/{notification_id}/delivery** — 外发 worker 回写真实送达状态。
+
+    { "status": "sent", "external_message_id": "mail-abc-123" }
+    // status: sent / delivered / failed
+
+通知对象新增字段：sent_status（pending/sent/delivered/failed，初始 pending）、external_message_id、sent_real_at（真实世界时间）。列表与详情端点都返回。
+
+### 12.3 客户来电记录
+
+**POST /api/world/customer-contacts** — 记录一次客户来电/投诉，后端自动判定 proactive（联系前系统是否已通知过该客户）。
+
+    { "customer_name": "Fonterra", "contact_type": "inbound_call",
+      "channel": "phone", "note": "询问延误情况",
+      "exception_id": "EXC-SIM-000066", "mode": "sea" }   // 后两个可选
+
+**GET /api/world/customer-contacts?limit=50** — 联系记录列表。
+### 12.4 承运人历史绩效（预测特征，P1）
+
+**GET /api/world/carrier-performance?mode=&risky_only=&limit=** — 每 12 模拟小时由世界维护任务自动刷新（保留每模式样本量前 200）：
+
+    { "count": 4, "carriers": [ {
+      "mode": "road", "carrier_key": "Mainfreight|CHC|HLZ",
+      "origin": "CHC", "destination": "HLZ",
+      "total_runs": 4, "delayed_runs": 2, "cancelled_runs": 0,
+      "avg_delay_minutes": 135.0, "on_time_rate": 0.5,
+      "top_reason": "breakdown", "refreshed_at": "..." } ] }
+
+risky_only=true 只返回准点率 ≤70% 且样本 ≥3 的高风险承运人。同时系统会给高风险承运人生成 historical_risk 状态的预测行（出现在 /world/predictions）。
+
+### 12.5 时序指标快照（P2）
+
+**GET /api/world/metrics?hours=72&mode=&name=** — 每 12 模拟小时一帧的 KPI 时序（保留 60 模拟天）：
+
+    { "count": 26, "from": "...", "metrics": [
+      { "ts": "2026-09-05T10:55:03", "mode": "sea", "name": "open_exceptions", "value": 1072.0 }, ... ] }
+
+指标名：open_exceptions / pending_approval / high_risk / resolved / automation_rate / escalation_rate / avg_detection_latency_min / notifications_pending_send / notifications_sent / decisions_total / proactive_notification_rate / sla_penalty_month_nzd。
+
+### 12.6 统一票视图（P2，ETL 用）
+
+**GET /api/world/tickets?limit=500** — 把三种方式的票级数据合并成统一结构：mode、parent_reference、ticket_number、commodity、customer、declared_value、service_level、sla_deadline、is_sla_breached、sla_penalty、parent_status、customer_email。按 sla_deadline 降序。
+
+---
+
+*本文档与代码同仓库维护（docs/API.md）。后端有字段新增时请同步更新。*

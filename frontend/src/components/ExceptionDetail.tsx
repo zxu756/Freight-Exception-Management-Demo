@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Search, Brain, MousePointerClick, Scale, Package, Bell } from 'lucide-react';
 import { airAPI, roadAPI, seaAPI } from '../services/api';
@@ -53,14 +53,43 @@ const ExceptionDetail = () => {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState(false);
   const [siblingLines, setSiblingLines] = useState<any[] | null>(null);
+  const [decisionMode, setDecisionMode] = useState<'approve' | 'reject' | 'modify'>('approve');
+  const [chosenAction, setChosenAction] = useState('');
+  const [decidedBy, setDecidedBy] = useState('');
+  const [note, setNote] = useState('');
+  const [deciding, setDeciding] = useState(false);
+  const [decisionMsg, setDecisionMsg] = useState('');
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     const api = APIS[mode ?? ''];
     if (!api || !exceptionId) return;
     api.getException(exceptionId)
       .then(setData)
       .catch(() => setError(true));
   }, [mode, exceptionId]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const submitDecision = async () => {
+    const api = APIS[mode ?? ''];
+    if (!api || !exceptionId || !data) return;
+    setDeciding(true);
+    setDecisionMsg('');
+    try {
+      await api.decideException(exceptionId, {
+        decided_by: decidedBy.trim() || 'Coordinator',
+        decision: decisionMode,
+        chosen_action: decisionMode === 'reject' ? null : (chosenAction || data.recommended_action),
+        note: note.trim() || undefined,
+      });
+      setDecisionMsg('决策已记录，异常已标记为已解决');
+      await reload();
+    } catch {
+      setDecisionMsg('决策提交失败，请重试');
+    } finally {
+      setDeciding(false);
+    }
+  };
 
   // 票级异常：加载同箱/同单/同主单的全部票做对比（海运/陆运用票号，空运用分运单号）
   const lineNumber = data?.cargo?.line_number;
@@ -207,6 +236,8 @@ const ExceptionDetail = () => {
           <Field label="根因" value={data.root_cause ?? '—'} highlight />
           <Field label="根因类别" value={data.root_cause_category ?? '—'} />
           <Field label="检测时间" value={data.detected_at ? data.detected_at.slice(0, 19).replace('T', ' ') : '—'} />
+          {data.trigger_event_id && <Field label="触发事件" value={data.trigger_event_id} />}
+          <Field label="检测延迟（事件→检测）" value={data.detection_latency_minutes != null ? data.detection_latency_minutes + ' 分钟' : '—'} highlight={data.detection_latency_minutes != null && data.detection_latency_minutes > 15} />
           {data.anomaly_reason && <Field label="预测信号" value={data.anomaly_reason} />}
         </Step>
 
@@ -266,6 +297,96 @@ const ExceptionDetail = () => {
           <Field label="恢复成本" value={data.recovery_cost != null ? `$${data.recovery_cost.toLocaleString()}` : '—'} />
           <Field label="预测下游影响" value={data.predicted_downstream_impact ?? '—'} highlight />
         </Step>
+
+        {/* 步骤 5：协调员决策（P0 学习闭环） */}
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Scale className="w-5 h-5 text-indigo-600" />
+            <h3 className="font-semibold text-gray-900">协调员决策 <span className="text-xs text-gray-400 font-normal">（审批结果会被 AI 学习，影响后续推荐排序）</span></h3>
+          </div>
+
+          {data.status === 'resolved' ? (
+            <div className="space-y-2 text-sm">
+              <div className="bg-green-50 border border-green-200 rounded p-3">
+                <p className="text-green-800 font-medium">已解决</p>
+                <p className="text-xs text-green-700 mt-1">
+                  实际行动 {data.actual_action ?? '—'} · 实际成本 {data.actual_cost != null ? '$' + data.actual_cost.toLocaleString() : '—'} · 实际挽回 {data.actual_recovery_hours ?? '—'}h
+                  {data.resolved_at ? ' · 解决时间 ' + data.resolved_at.slice(0, 19).replace('T', ' ') : ''}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={decidedBy}
+                  onChange={(e) => setDecidedBy(e.target.value)}
+                  placeholder="决策人（默认 Coordinator）"
+                  className="text-sm px-3 py-1.5 rounded border border-gray-300 focus:border-indigo-400 focus:outline-none w-52"
+                />
+                <div className="flex gap-1.5">
+                  {(['approve', 'modify', 'reject'] as const).map((k) => (
+                    <button
+                      key={k}
+                      onClick={() => setDecisionMode(k)}
+                      className={'px-3 py-1.5 rounded text-sm ' + (decisionMode === k ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200')}
+                    >
+                      {k === 'approve' ? '批准推荐' : k === 'modify' ? '修改后执行' : '驳回'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {decisionMode !== 'reject' && recoveryOptions.length > 0 && (
+                <select
+                  value={chosenAction || data.recommended_action || ''}
+                  onChange={(e) => setChosenAction(e.target.value)}
+                  className="text-sm px-3 py-1.5 rounded border border-gray-300 w-full max-w-md"
+                >
+                  {recoveryOptions.map((o: any) => (
+                    <option key={o.action} value={o.action}>{o.label ?? o.action}（成本 {'$' + (o.cost ?? '—')} · 挽回 {o.impact_hours ?? '—'}h）</option>
+                  ))}
+                </select>
+              )}
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="备注（为什么这么批，可选）"
+                rows={2}
+                className="text-sm px-3 py-2 rounded border border-gray-300 w-full focus:border-indigo-400 focus:outline-none"
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={submitDecision}
+                  disabled={deciding}
+                  className="px-4 py-2 rounded bg-indigo-600 text-white text-sm hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {deciding ? '提交中…' : '记录决策并标记已解决'}
+                </button>
+                {decisionMsg && <span className="text-xs text-gray-600">{decisionMsg}</span>}
+              </div>
+            </div>
+          )}
+
+          {data.decisions?.length > 0 && (
+            <div className="mt-4 space-y-1.5">
+              <p className="text-xs text-gray-500 font-medium">决策历史（{data.decisions.length} 条）</p>
+              {data.decisions.map((d: any) => (
+                <div key={d.decision_id} className="flex items-center justify-between text-xs rounded border border-gray-200 bg-gray-50 px-3 py-1.5">
+                  <span>
+                    <span className={'font-medium ' + (d.decision === 'approve' ? 'text-green-700' : d.decision === 'modify' ? 'text-amber-700' : 'text-red-600')}>
+                      {d.decision === 'approve' ? '批准' : d.decision === 'modify' ? '修改' : '驳回'}
+                    </span>
+                    <span className="text-gray-600 ml-2">{d.decided_by} · {d.chosen_action ?? '无行动'}</span>
+                    {d.note && <span className="text-gray-400 ml-2">{'"' + d.note + '"'}</span>}
+                  </span>
+                  <span className="text-gray-400 shrink-0 ml-2">
+                    {d.decision_latency_minutes != null ? d.decision_latency_minutes + 'min · ' : ''}{d.decided_at ? d.decided_at.slice(0, 19).replace('T', ' ') : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* 客户通知 */}
         {data.notifications?.length > 0 && (

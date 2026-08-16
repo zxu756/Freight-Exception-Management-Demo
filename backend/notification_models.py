@@ -24,6 +24,9 @@ class ExceptionNotification(Base):
     recipient_email = Column(String(200), nullable=True)  # 实际收件邮箱（客户主数据）
     recipient_phone = Column(String(30), nullable=True)  # 实际收件电话（客户主数据）
     channel = Column(String(20), nullable=False, default='email')
+    sent_status = Column(String(20), nullable=False, default='pending')  # pending/sent/failed/delivered
+    external_message_id = Column(String(100), nullable=True)  # 邮件/SMS 网关回写的外部消息 ID
+    sent_real_at = Column(DateTime, nullable=True)  # 真实外发时间（真实世界时间）
     message = Column(Text, nullable=False)  # plain-English 通知
     revised_eta = Column(DateTime, nullable=True)
     confidence = Column(Float, nullable=True)  # AI 置信度

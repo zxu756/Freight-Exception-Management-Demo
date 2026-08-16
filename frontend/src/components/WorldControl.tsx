@@ -27,17 +27,22 @@ const WorldControl = () => {
   const [predictions, setPredictions] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [custFilter, setCustFilter] = useState('');
+  const [carriers, setCarriers] = useState<any[]>([]);
+  const [metrics, setMetrics] = useState<any[]>([]);
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [c, w, s, sh, pr, cu] = await Promise.all([
-        worldAPI.getClock(), worldAPI.getWeather(), worldAPI.getState(), worldAPI.getShipments(), worldAPI.getPredictions(), worldAPI.getCustomers(),
+      const [c, w, s, sh, pr, cu, cp, mt] = await Promise.all([
+        worldAPI.getClock(), worldAPI.getWeather(), worldAPI.getState(), worldAPI.getShipments(),
+        worldAPI.getPredictions(), worldAPI.getCustomers(),
+        worldAPI.getCarrierPerformance(true, 20), worldAPI.getMetrics(168),
       ]);
       setClock(c); setRegions(w.regions ?? []); setEvents(s.active_events ?? []);
       setShipments(sh.shipments ?? []); setShipCount(sh.count ?? 0);
-      setPredictions(pr.predictions ?? []); setCustomers(cu.customers ?? []); setError(false);
+      setPredictions(pr.predictions ?? []); setCustomers(cu.customers ?? []);
+      setCarriers(cp.carriers ?? []); setMetrics(mt.metrics ?? []); setError(false);
     } catch {
       setError(true);
     }
@@ -216,6 +221,53 @@ const WorldControl = () => {
             ))}
           </div>
         </section>
+
+        {/* 承运人历史绩效 + 指标快照（Scenario 4 P1/P2） */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <section className="bg-white rounded-xl border border-gray-200 p-5">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span className="text-xl">🚦</span> 高风险承运人
+              <span className="text-xs text-gray-400">(历史准点率 ≤70% · {carriers.length})</span>
+            </h2>
+            {carriers.length === 0 && <p className="text-sm text-gray-400">暂无（每 12 模拟小时自动刷新，样本 ≥3 才上榜）</p>}
+            <div className="space-y-2 max-h-[420px] overflow-y-auto">
+              {carriers.map((c, i) => (
+                <div key={c.mode + c.carrier_key + i} className="rounded-lg border border-red-100 bg-red-50 px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-gray-800 truncate">{MODE_LABEL[c.mode] ?? c.mode} · {c.carrier_key}</span>
+                    <span className="text-xs font-semibold text-red-600 shrink-0 ml-2">准点率 {(c.on_time_rate * 100).toFixed(0)}%</span>
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    {c.total_runs} 个样本 · 平均延误 {c.avg_delay_minutes}min · 取消 {c.cancelled_runs} · 主因 {c.top_reason ?? '—'}
+                    {c.origin && c.destination ? ' · ' + c.origin + '→' + c.destination : ''}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="bg-white rounded-xl border border-gray-200 p-5">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span className="text-xl">📊</span> 指标快照
+              <span className="text-xs text-gray-400">(每 12 模拟小时一帧，最近 7 天)</span>
+            </h2>
+            {metrics.length === 0 && <p className="text-sm text-gray-400">暂无快照（世界维护任务每 12 模拟小时写入）</p>}
+            <div className="space-y-1 max-h-[420px] overflow-y-auto">
+              {metrics.slice(-60).map((m, i) => {
+                const pct = ['automation_rate', 'escalation_rate', 'proactive_notification_rate'].includes(m.name);
+                return (
+                  <div key={i} className="flex items-center justify-between text-xs rounded border border-gray-100 px-3 py-1.5">
+                    <span className="text-gray-600">
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-slate-700 text-white text-[9px] font-bold mr-1.5">{MODE_LABEL[m.mode] ?? '总'}</span>
+                      {m.name}
+                    </span>
+                    <span className="text-gray-400 shrink-0 ml-2">{m.ts.slice(11, 16)} · <span className="text-gray-700 font-medium">{pct ? (m.value * 100).toFixed(1) + '%' : m.name === 'sla_penalty_month_nzd' ? '$' + m.value.toLocaleString() : m.value.toLocaleString()}</span></span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <section className="bg-white rounded-xl border border-gray-200 p-5">

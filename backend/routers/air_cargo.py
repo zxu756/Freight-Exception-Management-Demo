@@ -429,6 +429,20 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
         ExceptionNotification.exception_id == exception_id,
         ExceptionNotification.mode == "air").all()
 
+    from decision_models import ExceptionDecision
+    _decisions = [
+        {
+            "decision_id": d.decision_id, "decided_by": d.decided_by,
+            "decision": d.decision, "chosen_action": d.chosen_action,
+            "note": d.note, "decision_latency_minutes": d.decision_latency_minutes,
+            "decided_at": d.decided_at.isoformat() if d.decided_at else None,
+        }
+        for d in db.query(ExceptionDecision).filter(
+            ExceptionDecision.mode == "air",
+            ExceptionDecision.exception_id == exception_id,
+        ).order_by(ExceptionDecision.decided_at).all()
+    ]
+
     _value = hawb.declared_value_nzd if hawb else (waybill.declared_value_nzd if waybill else None)
     _tier = hawb.customer_tier if hawb else (waybill.customer_tier if waybill else None)
     _cname = hawb.customer_name if hawb else (waybill.customer_name if waybill else None)
@@ -461,6 +475,13 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
         "recovery_cost": exc.recovery_cost,
         "predicted_downstream_impact": exc.predicted_downstream_impact,
         "delay_hours": exc.delay_hours,
+        "trigger_event_id": exc.trigger_event_id,
+        "detection_latency_minutes": exc.detection_latency_minutes,
+        "actual_action": exc.actual_action,
+        "actual_cost": exc.actual_cost,
+        "actual_recovery_hours": exc.actual_recovery_hours,
+        "resolved_at": exc.resolved_at.isoformat() if exc.resolved_at else None,
+        "decisions": _decisions,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "awb_number": waybill.awb_number if waybill else exc.awb_number,
@@ -488,6 +509,8 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
                 "channel": n.channel,
                 "recipient_email": n.recipient_email,
                 "recipient_phone": n.recipient_phone,
+                "sent_status": n.sent_status,
+                "external_message_id": n.external_message_id,
                 "message": n.message,
                 "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
                 "confidence": n.confidence,
@@ -495,6 +518,32 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
             }
             for n in notifications
         ],
+    }
+
+
+@router.post("/air/exceptions/{exception_id}/decision")
+async def decide_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """协调员审批/驳回/修改 AI 建议（body: decided_by, decision, chosen_action, note, actual_cost, actual_recovery_hours）。"""
+    from decision_models import record_decision
+    from world.clock import world_clock
+    try:
+        row, exc = record_decision(db, "air", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "success": True,
+        "decision": {
+            "decision_id": row.decision_id, "decided_by": row.decided_by,
+            "decision": row.decision, "chosen_action": row.chosen_action,
+            "decision_latency_minutes": row.decision_latency_minutes,
+            "decided_at": row.decided_at.isoformat(),
+        },
+        "exception": {
+            "exception_id": exc.exception_id, "status": exc.status,
+            "actual_action": exc.actual_action, "actual_cost": exc.actual_cost,
+            "actual_recovery_hours": exc.actual_recovery_hours,
+            "resolved_at": exc.resolved_at.isoformat() if exc.resolved_at else None,
+        },
     }
 
 
@@ -618,6 +667,8 @@ async def get_air_notifications(limit: int = 20, db: Session = Depends(get_db)):
                 "channel": n.channel,
                 "recipient_email": n.recipient_email,
                 "recipient_phone": n.recipient_phone,
+                "sent_status": n.sent_status,
+                "external_message_id": n.external_message_id,
                 "message": n.message,
                 "revised_eta": n.revised_eta.isoformat() if n.revised_eta else None,
                 "confidence": n.confidence,

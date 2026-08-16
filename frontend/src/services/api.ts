@@ -49,6 +49,10 @@ export const airAPI = {
     const response = await api.get(`/air/waybills/${ref}/house-bills`);
     return response.data;
   },
+  decideException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/air/exceptions/${exceptionId}/decision`, body);
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/air/sim/control', { action, speed });
     return response.data;
@@ -88,6 +92,10 @@ export const roadAPI = {
     const response = await api.get(`/road/consignments/${ref}/lines`);
     return response.data;
   },
+  decideException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/road/exceptions/${exceptionId}/decision`, body);
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/road/sim/control', { action, speed });
     return response.data;
@@ -123,6 +131,10 @@ export const seaAPI = {
     const response = await api.get(`/sea/containers/${ref}/lines`);
     return response.data;
   },
+  decideException: async (exceptionId: string, body: Record<string, unknown>) => {
+    const response = await api.post(`/sea/exceptions/${exceptionId}/decision`, body);
+    return response.data;
+  },
   control: async (action: string, speed?: number) => {
     const response = await api.post('/sea/sim/control', { action, speed });
     return response.data;
@@ -140,6 +152,12 @@ export const worldAPI = {
   getShipments: async () => (await api.get('/world/shipments')).data,
   getPredictions: async () => (await api.get('/world/predictions')).data,
   getCustomers: async (q?: string) => (await api.get('/world/customers', { params: q ? { q } : undefined })).data,
+  getCarrierPerformance: async (riskyOnly = true, limit = 20) => (await api.get('/world/carrier-performance', { params: { risky_only: riskyOnly, limit } })).data,
+  getMetrics: async (hours = 72) => (await api.get('/world/metrics', { params: { hours } })).data,
+  getTickets: async (limit = 100) => (await api.get('/world/tickets', { params: { limit } })).data,
+  getCustomerContacts: async (limit = 50) => (await api.get('/world/customer-contacts', { params: { limit } })).data,
+  recordCustomerContact: async (body: Record<string, unknown>) => (await api.post('/world/customer-contacts', body)).data,
+  markNotificationDelivered: async (notificationId: string, body: Record<string, unknown>) => (await api.post(`/notifications/${notificationId}/delivery`, body)).data,
 };
 
 export default api;

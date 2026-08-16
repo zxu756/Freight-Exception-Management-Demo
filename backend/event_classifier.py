@@ -254,14 +254,16 @@ ACTION_META = {
 }
 
 
-def build_recovery_options(category, cargo_value, customer_tier, custom_actions=None):
+def build_recovery_options(category, cargo_value, customer_tier, custom_actions=None, learned=None):
     """把该异常可用的预批准恢复行动排成 最推荐 → 最不推荐 的列表，每项带细节。
 
     打分规则（AI 决策偏好）：
     - 高价值/VIP 货：果断优先，score = 挽回小时 * 1.2 - 成本/200（加急专线额外 +2）
     - 普通货：低成本优先，score = 挽回小时 * 0.3 - 成本/60
+    - 历史协调员偏好（learned dict）：被协调员多次采纳的行动加分（上限 +1.5）
     """
     actions = list(RECOVERY_PLAYBOOK.get(category) or custom_actions or ["monitor"])
+    learned = learned or {}
     high_value = (cargo_value or 0) >= 50000 or customer_tier in ("VIP", "high")
 
     scored = []
@@ -273,8 +275,10 @@ def build_recovery_options(category, cargo_value, customer_tier, custom_actions=
             score = impact_hours * 1.2 - cost / 200.0 + (2.0 if action == "expedite_critical" else 0.0)
         else:
             score = impact_hours * 0.3 - cost / 60.0
+        score += learned.get(action, 0.0)
         scored.append({"action": action, "label": label, "description": desc,
-                       "impact_hours": impact_hours, "cost": cost, "score": round(score, 2)})
+                       "impact_hours": impact_hours, "cost": cost, "score": round(score, 2),
+                       "_learned": learned.get(action, 0.0)})
     scored.sort(key=lambda o: (-o["score"], o["cost"], o["action"]))
 
     # 内部效用分可能为负，转成 0-100 展示分再输出（排序结果不变）
@@ -283,29 +287,31 @@ def build_recovery_options(category, cargo_value, customer_tier, custom_actions=
 
     top = scored[0]
     for i, o in enumerate(scored):
+        learned_note = (f"（含历史协调员偏好加分 {o['_learned']:.1f}）" if o["_learned"] else "")
         if i == 0:
             o["why"] = (f"综合得分 {o['score']:.1f} 排名第一：预计挽回约 {o['impact_hours']}h 延误，"
-                        f"成本 ${o['cost']:,}，收益/成本比最优。")
+                        f"成本 ${o['cost']:,}，收益/成本比最优。{learned_note}")
         else:
             weaker = (f"挽回延误较少（{o['impact_hours']}h）"
                       if o["impact_hours"] < top["impact_hours"]
                       else f"成本更高（${o['cost']:,}）")
-            o["why"] = f"综合得分 {o['score']:.1f}：{weaker}，性价比低于第一方案。"
+            o["why"] = f"综合得分 {o['score']:.1f}：{weaker}，性价比低于第一方案。{learned_note}"
+        o.pop("_learned", None)
         o["recommended"] = (i == 0)
     return scored
 
 
-def recovery_options_json(category, cargo_value=None, customer_tier=None, custom_actions=None):
+def recovery_options_json(category, cargo_value=None, customer_tier=None, custom_actions=None, learned=None):
     """序列化排序后的恢复行动列表（新异常写入用）。"""
     import json as _json
     return _json.dumps(
-        build_recovery_options(category, cargo_value, customer_tier, custom_actions),
+        build_recovery_options(category, cargo_value, customer_tier, custom_actions, learned),
         ensure_ascii=False)
 
 
-def select_best_recovery(category, cargo_value, customer_tier, custom_actions=None):
+def select_best_recovery(category, cargo_value, customer_tier, custom_actions=None, learned=None):
     """Select the best pre-approved recovery action and explain why (top of the ranked list)."""
-    ranked = build_recovery_options(category, cargo_value, customer_tier, custom_actions)
+    ranked = build_recovery_options(category, cargo_value, customer_tier, custom_actions, learned)
     best = ranked[0]
     high_value = (cargo_value or 0) >= 50000 or customer_tier in ("VIP", "high")
     context = ("高价值/VIP 货，AI 偏好果断、快速的方案。" if high_value

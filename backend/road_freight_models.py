@@ -232,6 +232,12 @@ class RoadException(Base):
     sla_clock_paused = Column(Boolean, default=False)  # 客户义务未履行，SLA 时钟暂停
     pause_reason = Column(String(20), nullable=True)  # 暂停原因（CU-01~CU-10）
     resolved_at = Column(DateTime, nullable=True)
+    # Scenario 4 P0/P1：触发事件关联 + 检测延迟 + 实际执行结果
+    trigger_event_id = Column(String(50), nullable=True)  # 触发该异常的那条追踪事件
+    detection_latency_minutes = Column(Float, nullable=True)  # 触发事件 → 检测 的分钟数
+    actual_action = Column(String(50), nullable=True)  # 协调员最终执行的恢复行动
+    actual_cost = Column(Float, nullable=True)  # 实际恢复成本 NZD
+    actual_recovery_hours = Column(Float, nullable=True)  # 实际挽回小时数
     created_at = Column(DateTime, default=datetime.utcnow)
 
     consignment = relationship("RoadConsignment", back_populates="exceptions")

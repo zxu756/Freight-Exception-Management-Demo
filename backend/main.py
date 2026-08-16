@@ -13,6 +13,8 @@ import road_freight_models  # noqa: F401  # Register road freight tables on Base
 import sea_freight_models  # noqa: F401  # Register sea freight tables on Base.metadata
 import notification_models  # noqa: F401  # Register customer notification table
 import customer_models  # noqa: F401  # Register customer master data table
+import decision_models  # noqa: F401  # Register coordinator decision tables
+import world.maintenance  # noqa: F401  # Register carrier performance + metric snapshot tables
 import sla_models  # noqa: F401  # Register SLA policy table
 import environment_models  # noqa: F401  # Register environmental event table
 import world.weather  # noqa: F401  # Register weather override table
@@ -133,6 +135,34 @@ def _migrate_ml_fields():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN breach_type VARCHAR(20)"))
             if "sla_penalty_nzd" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN sla_penalty_nzd FLOAT"))
+
+    # Scenario 4 P0/P1 columns on exception tables (trigger link / latency / actual outcome)
+    for table in ["air_exceptions", "road_exceptions", "sea_exceptions"]:
+        if table not in insp.get_table_names():
+            continue
+        cols = {c["name"] for c in insp.get_columns(table)}
+        with engine.begin() as conn:
+            if "trigger_event_id" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN trigger_event_id VARCHAR(50)"))
+            if "detection_latency_minutes" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN detection_latency_minutes FLOAT"))
+            if "actual_action" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN actual_action VARCHAR(50)"))
+            if "actual_cost" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN actual_cost FLOAT"))
+            if "actual_recovery_hours" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN actual_recovery_hours FLOAT"))
+
+    # Notification outbox columns (real delivery status)
+    if "exception_notifications" in insp.get_table_names():
+        cols = {c["name"] for c in insp.get_columns("exception_notifications")}
+        with engine.begin() as conn:
+            if "sent_status" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN sent_status VARCHAR(20) DEFAULT 'pending'"))
+            if "external_message_id" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN external_message_id VARCHAR(100)"))
+            if "sent_real_at" not in cols:
+                conn.execute(text("ALTER TABLE exception_notifications ADD COLUMN sent_real_at DATETIME"))
 
 
 @asynccontextmanager

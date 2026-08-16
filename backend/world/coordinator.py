@@ -9,11 +9,13 @@ This is the single tick loop of the digital twin. Each tick:
 """
 import threading
 import time
+from datetime import timedelta
 
 from config import settings
 from world.clock import world_clock
 
 TICK_SECONDS = 5.0
+MAINTENANCE_INTERVAL = timedelta(hours=12)  # 每 12 模拟小时刷新一次绩效/指标快照
 
 
 class WorldSimulator:
@@ -25,6 +27,7 @@ class WorldSimulator:
         self.running = False
         self._stop_event = threading.Event()
         self._thread = None
+        self._last_maintenance = None
 
     def start(self):
         if self.running:
@@ -74,6 +77,19 @@ class WorldSimulator:
                     self.propagate(now)
                 except Exception as ex:
                     print(f"[world] propagate error: {ex}")
+                # 定期维护：承运人绩效、历史风险预测、KPI 指标快照（P1/P2）
+                if self._last_maintenance is None or now - self._last_maintenance >= MAINTENANCE_INTERVAL:
+                    try:
+                        from database import SessionLocal
+                        from world.maintenance import maintenance
+                        _db = SessionLocal()
+                        try:
+                            maintenance(_db, now)
+                        finally:
+                            _db.close()
+                        self._last_maintenance = now
+                    except Exception as ex:
+                        print(f"[world] maintenance error: {ex}")
             time.sleep(max(0.1, TICK_SECONDS - (time.monotonic() - t0)))
 
     def propagate(self, now):

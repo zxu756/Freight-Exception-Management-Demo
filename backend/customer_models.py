@@ -9,7 +9,7 @@ Customer master data - one coherent directory of NZ freight customers.
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean
 from database import Base
 
 
@@ -121,3 +121,53 @@ def get_customer_contact(db, name):
     return {"name": c.name, "contact_name": c.contact_name, "email": c.email,
             "phone": c.phone, "mobile": c.mobile, "channel": c.preferred_channel,
             "city": c.city}
+
+
+class CustomerContact(Base):
+    """客户来电/投诉等主动联系记录（Scenario 4 P0：度量"通知是否先于客户来电"）。"""
+    __tablename__ = "customer_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contact_id = Column(String(50), unique=True, nullable=False, index=True)
+    mode = Column(String(10), nullable=True)  # sea/air/road（可为空）
+    exception_id = Column(String(50), nullable=True, index=True)
+    customer_name = Column(String(200), nullable=False, index=True)
+    contact_type = Column(String(20), nullable=False, default='inbound_call')  # inbound_call/complaint/inquiry/other
+    channel = Column(String(20), nullable=True)  # phone/email/portal
+    note = Column(Text, nullable=True)
+    proactive = Column(Boolean, default=False)  # True=联系前系统已主动通知该客户
+    contacted_at = Column(DateTime, nullable=False)  # 模拟世界时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+def record_customer_contact(db, body, now):
+    """记录一次客户联系，并自动判定是否"系统通知先于客户联系"（主动通知）。"""
+    import uuid
+    from notification_models import ExceptionNotification
+
+    customer_name = (body.get("customer_name") or "").strip()
+    if not customer_name:
+        raise ValueError("customer_name is required")
+
+    query = db.query(ExceptionNotification).filter(
+        ExceptionNotification.recipient == customer_name,
+        ExceptionNotification.sent_at <= now,
+    )
+    if body.get("exception_id"):
+        query = query.filter(ExceptionNotification.exception_id == body["exception_id"])
+    proactive = query.first() is not None
+
+    row = CustomerContact(
+        contact_id=f"CC-{uuid.uuid4().hex[:10]}",
+        mode=body.get("mode"),
+        exception_id=body.get("exception_id"),
+        customer_name=customer_name,
+        contact_type=body.get("contact_type") or "inbound_call",
+        channel=body.get("channel"),
+        note=body.get("note"),
+        proactive=proactive,
+        contacted_at=now,
+    )
+    db.add(row)
+    db.commit()
+    return row
