@@ -30,7 +30,7 @@ class WorldMeta(Base):
 class WorldClock:
     """Single global simulation clock. One thread advances time; everyone reads it."""
 
-    def __init__(self, speed: float = 60.0, tick_seconds: float = 5.0):
+    def __init__(self, speed: float = 1.0, tick_seconds: float = 5.0):
         self._now = datetime.utcnow().replace(microsecond=0)
         self._speed = float(speed)
         self._paused = False
