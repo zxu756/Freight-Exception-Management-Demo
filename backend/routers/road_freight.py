@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 @router.get("/road/depots")
-async def get_depots(
+def get_depots(
     island: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
@@ -45,7 +45,7 @@ async def get_depots(
 
 
 @router.get("/road/segments")
-async def get_road_segments(db: Session = Depends(get_db)):
+def get_road_segments(db: Session = Depends(get_db)):
     """Get live road conditions for all route segments (实时路况)."""
     from road_freight_models import RoadSegment
     segments = db.query(RoadSegment).all()
@@ -68,7 +68,7 @@ async def get_road_segments(db: Session = Depends(get_db)):
 
 
 @router.get("/road/trips")
-async def get_trips(
+def get_trips(
     status: Optional[str] = None,
     origin: Optional[str] = None,
     destination: Optional[str] = None,
@@ -115,7 +115,7 @@ async def get_trips(
 
 
 @router.get("/road/consignments")
-async def get_consignments(
+def get_consignments(
     route_type: Optional[str] = None,
     status: Optional[str] = None,
     customer_tier: Optional[str] = None,
@@ -163,7 +163,7 @@ async def get_consignments(
 
 
 @router.get("/road/consignments/{consignment_number}")
-async def get_consignment_detail(consignment_number: str, db: Session = Depends(get_db)):
+def get_consignment_detail(consignment_number: str, db: Session = Depends(get_db)):
     """Get detailed road consignment information."""
     cons = db.query(RoadConsignment).filter(
         RoadConsignment.consignment_number == consignment_number).first()
@@ -284,7 +284,7 @@ async def get_consignment_detail(consignment_number: str, db: Session = Depends(
 
 
 @router.get("/road/consignments/{consignment_number}/lines")
-async def get_consignment_lines(consignment_number: str, db: Session = Depends(get_db)):
+def get_consignment_lines(consignment_number: str, db: Session = Depends(get_db)):
     """List the individual cargo lines (LTL consignments) inside a road consignment."""
     lines = db.query(ConsignmentLine).filter(
         ConsignmentLine.consignment_number == consignment_number
@@ -317,7 +317,7 @@ async def get_consignment_lines(consignment_number: str, db: Session = Depends(g
 
 
 @router.get("/road/exceptions")
-async def get_road_exceptions(
+def get_road_exceptions(
     exception_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
@@ -371,7 +371,7 @@ async def get_road_exceptions(
 
 
 @router.get("/road/exceptions/{exception_id}")
-async def get_road_exception_detail(exception_id: str, db: Session = Depends(get_db)):
+def get_road_exception_detail(exception_id: str, db: Session = Depends(get_db)):
     """Get a single exception with full detail for the four-step AI pipeline view."""
     exc = db.query(RoadException).filter(RoadException.exception_id == exception_id).first()
     if not exc:
@@ -447,6 +447,7 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
         "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
         "close_evidence": exc.close_evidence,
         "reopen_count": exc.reopen_count,
+        "escalation_reason": exc.escalation_reason,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "consignment_number": cons.consignment_number if cons else exc.consignment_number,
@@ -487,7 +488,7 @@ async def get_road_exception_detail(exception_id: str, db: Session = Depends(get
 
 
 @router.post("/road/exceptions/{exception_id}/decision")
-async def decide_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def decide_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """协调员审批/驳回/修改 AI 建议（body: decided_by, decision, chosen_action, note, actual_cost, actual_recovery_hours）。"""
     from decision_models import record_decision
     from world.clock import world_clock
@@ -513,7 +514,7 @@ async def decide_road_exception(exception_id: str, body: dict, db: Session = Dep
 
 
 @router.post("/road/exceptions/{exception_id}/disposition")
-async def disposition_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def disposition_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工确认/标记误报/重复/数据问题（EVT-006）。"""
     from exception_ops import set_disposition
     from world.clock import world_clock
@@ -526,7 +527,7 @@ async def disposition_road_exception(exception_id: str, body: dict, db: Session 
 
 
 @router.post("/road/exceptions/{exception_id}/close")
-async def close_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def close_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工结案（MON-005）。"""
     from exception_ops import close_exception
     from world.clock import world_clock
@@ -539,7 +540,7 @@ async def close_road_exception(exception_id: str, body: dict, db: Session = Depe
 
 
 @router.post("/road/exceptions/{exception_id}/reopen")
-async def reopen_road_exception(exception_id: str, db: Session = Depends(get_db)):
+def reopen_road_exception(exception_id: str, db: Session = Depends(get_db)):
     """重新打开案件。"""
     from exception_ops import reopen_exception
     from world.clock import world_clock
@@ -552,7 +553,7 @@ async def reopen_road_exception(exception_id: str, db: Session = Depends(get_db)
 
 
 @router.post("/road/exceptions")
-async def create_road_exception(body: dict, db: Session = Depends(get_db)):
+def create_road_exception(body: dict, db: Session = Depends(get_db)):
     """人工创建异常（EVT-006）。"""
     from exception_ops import create_manual_exception
     from world.clock import world_clock
@@ -565,7 +566,7 @@ async def create_road_exception(body: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/road/dashboard")
-async def get_road_dashboard(db: Session = Depends(get_db)):
+def get_road_dashboard(db: Session = Depends(get_db)):
     """Get road freight operations dashboard summary."""
     total_cons = db.query(RoadConsignment).count()
     line_haul = db.query(RoadConsignment).filter(RoadConsignment.route_type == "line_haul").count()
@@ -616,7 +617,7 @@ async def get_road_dashboard(db: Session = Depends(get_db)):
 
 
 @router.get("/road/kpi")
-async def get_road_kpi(db: Session = Depends(get_db)):
+def get_road_kpi(db: Session = Depends(get_db)):
     """Get road freight exception-management KPIs (Kratos Task 12)."""
     total = db.query(RoadException).count()
     if total == 0:
@@ -658,7 +659,7 @@ async def get_road_kpi(db: Session = Depends(get_db)):
 
 
 @router.get("/road/notifications")
-async def get_road_notifications(limit: int = 20, db: Session = Depends(get_db)):
+def get_road_notifications(limit: int = 20, db: Session = Depends(get_db)):
     """Get proactive customer notifications for road freight exceptions."""
     from notification_models import ExceptionNotification
     notifs = db.query(ExceptionNotification).filter(
@@ -688,7 +689,7 @@ async def get_road_notifications(limit: int = 20, db: Session = Depends(get_db))
 
 
 @router.get("/road/live")
-async def get_road_live(db: Session = Depends(get_db)):
+def get_road_live(db: Session = Depends(get_db)):
     """Get live road freight simulation status and recent activity."""
     from road_freight_simulator import simulator
 
@@ -784,7 +785,7 @@ async def get_road_live(db: Session = Depends(get_db)):
 
 
 @router.post("/road/sim/control")
-async def control_road_sim(body: dict, db: Session = Depends(get_db)):
+def control_road_sim(body: dict, db: Session = Depends(get_db)):
     """Control the live road freight simulator."""
     from road_freight_simulator import simulator
 
@@ -813,7 +814,7 @@ async def control_road_sim(body: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/road/env/event")
-async def trigger_road_env_event(body: dict, db: Session = Depends(get_db)):
+def trigger_road_env_event(body: dict, db: Session = Depends(get_db)):
     """手动注入一个环境事件（用于演示特定场景，如"奥克兰暴雨"）"""
     from datetime import timedelta
     from environment_events import EVENT_TEMPLATES, ROAD_LOCATIONS
@@ -853,7 +854,7 @@ async def trigger_road_env_event(body: dict, db: Session = Depends(get_db)):
     }
 
 @router.get("/road/env/events")
-async def get_road_env_events(db: Session = Depends(get_db)):
+def get_road_env_events(db: Session = Depends(get_db)):
     """查活跃环境事件（实时路况通报）"""
     from environment_models import EnvironmentEvent
     from road_freight_simulator import simulator

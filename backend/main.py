@@ -16,6 +16,7 @@ import notification_models  # noqa: F401  # Register customer notification table
 import customer_models  # noqa: F401  # Register customer master data table
 import decision_models  # noqa: F401  # Register coordinator decision tables
 import quote_models  # noqa: F401  # Register carrier quote table
+import admin_models  # noqa: F401  # Register users table (RBAC)
 import world.maintenance  # noqa: F401  # Register carrier performance + metric snapshot tables
 import sla_models  # noqa: F401  # Register SLA policy table
 import environment_models  # noqa: F401  # Register environmental event table
@@ -161,6 +162,8 @@ def _migrate_ml_fields():
                                ("reopen_count", "INTEGER DEFAULT 0")):
                 if _col not in cols:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {_col} {_ddl}"))
+            if "escalation_reason" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN escalation_reason VARCHAR(200)"))
 
     # Notification outbox columns (real delivery status)
     if "exception_notifications" in insp.get_table_names():
@@ -198,6 +201,8 @@ async def lifespan(app: FastAPI):
         _created = seed_customers(_db)
         if _created:
             print(f"Customer directory seeded: {_created} new customers")
+        from admin_models import seed_users
+        seed_users(_db)
     finally:
         _db.close()
     print("Database initialized successfully")
@@ -227,6 +232,13 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan
 )
+
+
+# RBAC 权限不足 → 403（PermissionError 统一转 HTTP 403）
+@app.exception_handler(PermissionError)
+async def permission_error_handler(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 
 # Configure CORS
 app.add_middleware(

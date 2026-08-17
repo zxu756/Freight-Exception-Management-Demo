@@ -294,7 +294,10 @@ class RoadFreightSimulator:
         """Rebuild the in-memory pending event heap after a process restart."""
         db = SessionLocal()
         try:
-            trips = db.query(RoadTrip).filter(RoadTrip.status != "cancelled").all()
+            trips = db.query(RoadTrip).filter(
+                RoadTrip.status != "cancelled",
+                RoadTrip.scheduled_departure >= self.sim_now - timedelta(hours=48),
+            ).all()
             for trip in trips:
                 eff_dep = trip.scheduled_departure + timedelta(minutes=trip.delay_minutes or 0)
                 eff_arr = trip.scheduled_arrival + timedelta(minutes=trip.delay_minutes or 0)
@@ -710,7 +713,7 @@ class RoadFreightSimulator:
 
     def _process_pending(self, db):
         # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
-        budget = 300
+        budget = 1000
         while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
             _, _, kind, payload = heapq.heappop(self._pending)
@@ -961,6 +964,8 @@ class RoadFreightSimulator:
                 )
 
     def _create_exception(self, db, consignment, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None, consignment_line=None):
+        from exception_ops import reopen_if_closed
+        reopen_if_closed(db, "road", consignment.consignment_number, self.sim_now)
         # 票级异常时用票的货物字段（货主/货值/温度/SLA/HS），通知也只发给该票货主
         _value = consignment_line.declared_value_nzd if consignment_line else consignment.declared_value_nzd
         _tier = consignment_line.customer_tier if consignment_line else consignment.customer_tier

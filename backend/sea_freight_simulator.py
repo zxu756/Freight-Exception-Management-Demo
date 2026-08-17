@@ -270,17 +270,16 @@ class SeaFreightSimulator:
             VesselVisit.arrival_datetime >= lo,
             VesselVisit.arrival_datetime <= hi,
         ).all()
+        done_visits = {r[0] for r in db.query(SeaContainer.vessel_visit_id).all()}
         for visit in visits:
-            self._generate_containers_for_visit(db, visit)
+            self._generate_containers_for_visit(db, visit, done_visits)
 
-    def _generate_containers_for_visit(self, db, visit):
+    def _generate_containers_for_visit(self, db, visit, done_visits=None):
         if visit.vessel_visit_id in self._generated_vessels:
             return
         self._generated_vessels.add(visit.vessel_visit_id)
-        # 重启幂等：该船期已生成过集装箱则跳过（避免每次重启重复生成、量级膨胀）
-        existing = db.query(SeaContainer.container_number).filter(
-            SeaContainer.vessel_visit_id == visit.vessel_visit_id).first()
-        if existing:
+        # 重启幂等：该船期已生成过集装箱则跳过（批量集合查询，避免逐 visit 单查拖慢 tick）
+        if done_visits is not None and visit.vessel_visit_id in done_visits:
             return
         # 暂只做进口（往新西兰走）：出口/沿海航段不生成货物
         prev_intl = not self._is_nz_port_name(visit.previous_port)
@@ -512,7 +511,7 @@ class SeaFreightSimulator:
 
     def _process_pending(self, db):
         # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
-        budget = 300
+        budget = 1000
         while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
             _, _, kind, payload = heapq.heappop(self._pending)
@@ -743,6 +742,8 @@ class SeaFreightSimulator:
         )
 
     def _create_exception(self, db, container, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None, cargo_line=None):
+        from exception_ops import reopen_if_closed
+        reopen_if_closed(db, "sea", container.container_number, self.sim_now)
         # 票级异常时用票的货物字段（货主/货值/温度/SLA/HS），通知也只发给该票货主
         _value = cargo_line.declared_value_nzd if cargo_line else container.declared_value_nzd
         _tier = cargo_line.customer_tier if cargo_line else container.customer_tier

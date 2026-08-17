@@ -916,3 +916,36 @@ risky_only=true 只返回准点率 ≤70% 且样本 ≥3 的高风险承运人�
 | POST /api/world/quotes/{quote_id}/select | 选择报价（其余同异常报价自动置为 rejected） |
 
 *本文档与代码同仓库维护（docs/API.md）。*
+---
+
+## 15. RBAC / 审批升级 / 二次偏差重开 / 网络事件编组（ADM-001 · APR-005 · MON-002 · EVT-008）
+
+### 15.1 简化 RBAC（ADM-001）
+
+- 预置用户：U-ALICE 协调员(planner) / U-BOB 经理(manager) / U-CAROL 客服(cs) / U-DAVE 管理员(admin) / U-EVE 分析师(analyst)；
+- 敏感操作按角色矩阵校验：decision/disposition/close/reopen/create_exception → planner+manager；review → cs+manager；quotes → planner+manager；
+- 审批矩阵（APR-001/002）：risk_level=high 或 recovery_cost>=2000 的动作必须 manager/admin，否则 403；
+- 操作人从 body 的 user/user_id/decided_by/by/reviewed_by 任一字段解析（找不到用户时宽松放行，兼容旧调用）；
+- GET /api/world/users 列出用户与角色；权限不足统一返回 403 {"detail": "..."}。
+
+### 15.2 审批超时升级（APR-005）
+
+世界维护任务每 12 模拟小时检查：pending_approval 超过 24 模拟小时未处理 → 自动升级为 escalated，并在 escalation_reason 记录原因。异常详情端点返回 escalation_reason。
+
+### 15.3 二次偏差自动重开（MON-002）
+
+任一方式生成新异常时，若该装载单元已有 closed 案件 → 自动重新打开（status=reopened、reopen_count+1、escalation_reason 追加时间戳），保留原时间线。
+
+### 15.4 网络事件编组（EVT-008）
+
+| 方法 & 路径 | 说明 |
+| --- | --- |
+| GET /api/world/network-events | 活跃天气/港口/线路事件 → 受影响班次数（来自预测行）+ 受影响客户清单 |
+| POST /api/world/network-events/{event_id}/notify | 批量处置：把一个网络事件影响的全部待审通知一次性批准外发（body={by}），返回批准数 |
+
+### 15.5 性能修复
+
+- 所有端点由 async def 改为同步 def（无 await），FastAPI 在线程池执行，事件循环不再被同步 SQL 阻塞——重负载下时钟/健康接口仍即时响应；
+- 事件积压每 tick 最多处理 1000 条；重启重建 pending 堆只取 48 小时窗口；海运回填幂等改为批量集合查询——启动/时钟大跳后不再长时间卡死。
+
+*本文档与代码同仓库维护（docs/API.md）。*

@@ -182,7 +182,10 @@ class RailFreightSimulator:
         """Rebuild the in-memory pending heap after a restart."""
         db = SessionLocal()
         try:
-            trains = db.query(RailService).filter(RailService.status.in_(["scheduled", "in_transit", "delayed"])).all()
+            trains = db.query(RailService).filter(
+                RailService.status.in_(["scheduled", "in_transit", "delayed"]),
+                RailService.scheduled_departure >= self.sim_now - timedelta(hours=48),
+            ).all()
             for t in trains:
                 eff_dep = t.scheduled_departure + timedelta(minutes=t.delay_minutes or 0)
                 arr = t.scheduled_arrival + timedelta(minutes=t.delay_minutes or 0)
@@ -349,7 +352,7 @@ class RailFreightSimulator:
 
     # ---------------- pending event processing ----------------
     def _process_pending(self, db):
-        budget = 300
+        budget = 1000
         while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
             ts, _seq, kind, payload = heapq.heappop(self._pending)
@@ -461,6 +464,8 @@ class RailFreightSimulator:
                 break  # 一票一异常，控制量级
 
     def _create_exception(self, db, cons, exc_type, root_cause, delay_hours, diagnosis, recovery, line=None):
+        from exception_ops import reopen_if_closed
+        reopen_if_closed(db, "rail", cons.consignment_number, self.sim_now)
         _value = line.declared_value_nzd if line else cons.declared_value_nzd
         _tier = line.customer_tier if line else cons.customer_tier
         _hs = line.commodity_code if line else cons.commodity_code

@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.get("/rail/stations")
-async def get_rail_stations(island: Optional[str] = None, db: Session = Depends(get_db)):
+def get_rail_stations(island: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(RailStation)
     if island:
         query = query.filter(RailStation.island == island)
@@ -29,7 +29,7 @@ async def get_rail_stations(island: Optional[str] = None, db: Session = Depends(
 
 
 @router.get("/rail/segments")
-async def get_rail_segments(db: Session = Depends(get_db)):
+def get_rail_segments(db: Session = Depends(get_db)):
     rows = db.query(RailSegment).all()
     return {"count": len(rows), "segments": [
         {"origin": s.origin, "destination": s.destination, "condition": s.condition,
@@ -38,7 +38,7 @@ async def get_rail_segments(db: Session = Depends(get_db)):
 
 
 @router.get("/rail/services")
-async def get_rail_services(
+def get_rail_services(
     status: Optional[str] = None, origin: Optional[str] = None,
     destination: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(RailService)
@@ -62,7 +62,7 @@ async def get_rail_services(
 
 
 @router.get("/rail/consignments")
-async def get_rail_consignments(
+def get_rail_consignments(
     route_type: Optional[str] = None, status: Optional[str] = None,
     customer_tier: Optional[str] = None, has_exception: bool = False,
     db: Session = Depends(get_db)):
@@ -90,7 +90,7 @@ async def get_rail_consignments(
 
 
 @router.get("/rail/consignments/{consignment_number}")
-async def get_rail_consignment_detail(consignment_number: str, db: Session = Depends(get_db)):
+def get_rail_consignment_detail(consignment_number: str, db: Session = Depends(get_db)):
     cons = db.query(RailConsignment).filter(
         RailConsignment.consignment_number == consignment_number).first()
     if not cons:
@@ -134,7 +134,7 @@ async def get_rail_consignment_detail(consignment_number: str, db: Session = Dep
 
 
 @router.get("/rail/consignments/{consignment_number}/lines")
-async def get_rail_consignment_lines(consignment_number: str, db: Session = Depends(get_db)):
+def get_rail_consignment_lines(consignment_number: str, db: Session = Depends(get_db)):
     lines = db.query(RailConsignmentLine).filter(
         RailConsignmentLine.consignment_number == consignment_number).all()
     return {"consignment_number": consignment_number, "count": len(lines), "lines": [
@@ -150,7 +150,7 @@ async def get_rail_consignment_lines(consignment_number: str, db: Session = Depe
 
 
 @router.get("/rail/exceptions")
-async def get_rail_exceptions(
+def get_rail_exceptions(
     exception_type: Optional[str] = None, risk_level: Optional[str] = None,
     status: Optional[str] = None, limit: int = 200, db: Session = Depends(get_db)):
     query = db.query(RailException)
@@ -178,7 +178,7 @@ async def get_rail_exceptions(
 
 
 @router.get("/rail/exceptions/{exception_id}")
-async def get_rail_exception_detail(exception_id: str, db: Session = Depends(get_db)):
+def get_rail_exception_detail(exception_id: str, db: Session = Depends(get_db)):
     exc = db.query(RailException).filter(RailException.exception_id == exception_id).first()
     if not exc:
         raise HTTPException(status_code=404, detail="Exception not found")
@@ -236,6 +236,7 @@ async def get_rail_exception_detail(exception_id: str, db: Session = Depends(get
         "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
         "close_evidence": exc.close_evidence,
         "reopen_count": exc.reopen_count,
+        "escalation_reason": exc.escalation_reason,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "consignment_number": cons.consignment_number if cons else exc.consignment_number,
@@ -266,7 +267,7 @@ async def get_rail_exception_detail(exception_id: str, db: Session = Depends(get
 
 
 @router.post("/rail/exceptions/{exception_id}/decision")
-async def decide_rail_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def decide_rail_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """协调员审批/驳回/修改 AI 建议。"""
     from decision_models import record_decision
     from world.clock import world_clock
@@ -286,7 +287,7 @@ async def decide_rail_exception(exception_id: str, body: dict, db: Session = Dep
 
 
 @router.post("/rail/exceptions/{exception_id}/disposition")
-async def disposition_rail_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def disposition_rail_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工确认/标记误报/重复/数据问题（EVT-006）。"""
     from exception_ops import set_disposition
     from world.clock import world_clock
@@ -299,7 +300,7 @@ async def disposition_rail_exception(exception_id: str, body: dict, db: Session 
 
 
 @router.post("/rail/exceptions/{exception_id}/close")
-async def close_rail_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def close_rail_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工结案（MON-005）。"""
     from exception_ops import close_exception
     from world.clock import world_clock
@@ -312,7 +313,7 @@ async def close_rail_exception(exception_id: str, body: dict, db: Session = Depe
 
 
 @router.post("/rail/exceptions/{exception_id}/reopen")
-async def reopen_rail_exception(exception_id: str, db: Session = Depends(get_db)):
+def reopen_rail_exception(exception_id: str, db: Session = Depends(get_db)):
     """重新打开案件。"""
     from exception_ops import reopen_exception
     from world.clock import world_clock
@@ -325,7 +326,7 @@ async def reopen_rail_exception(exception_id: str, db: Session = Depends(get_db)
 
 
 @router.post("/rail/exceptions")
-async def create_rail_exception(body: dict, db: Session = Depends(get_db)):
+def create_rail_exception(body: dict, db: Session = Depends(get_db)):
     """人工创建异常（EVT-006）。"""
     from exception_ops import create_manual_exception
     from world.clock import world_clock
@@ -338,7 +339,7 @@ async def create_rail_exception(body: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/rail/dashboard")
-async def get_rail_dashboard(db: Session = Depends(get_db)):
+def get_rail_dashboard(db: Session = Depends(get_db)):
     total = db.query(RailConsignment).count()
     intermodal = db.query(RailConsignment).filter(RailConsignment.route_type == "intermodal").count()
     bulk = db.query(RailConsignment).filter(RailConsignment.route_type == "bulk").count()
@@ -360,7 +361,7 @@ async def get_rail_dashboard(db: Session = Depends(get_db)):
 
 
 @router.get("/rail/kpi")
-async def get_rail_kpi(db: Session = Depends(get_db)):
+def get_rail_kpi(db: Session = Depends(get_db)):
     total = db.query(RailException).count()
     if total == 0:
         return {"total": 0}
@@ -381,7 +382,7 @@ async def get_rail_kpi(db: Session = Depends(get_db)):
 
 
 @router.get("/rail/notifications")
-async def get_rail_notifications(limit: int = 20, db: Session = Depends(get_db)):
+def get_rail_notifications(limit: int = 20, db: Session = Depends(get_db)):
     from notification_models import ExceptionNotification
     rows = db.query(ExceptionNotification).filter(
         ExceptionNotification.mode == "rail"
@@ -396,7 +397,7 @@ async def get_rail_notifications(limit: int = 20, db: Session = Depends(get_db))
 
 
 @router.get("/rail/live")
-async def get_rail_live(db: Session = Depends(get_db)):
+def get_rail_live(db: Session = Depends(get_db)):
     from rail_freight_simulator import simulator
     return {"simulator": {"running": simulator.running, "paused": simulator.paused,
                           "speed": simulator.speed, "sim_now": simulator.sim_now.isoformat(),
@@ -432,7 +433,7 @@ async def get_rail_live(db: Session = Depends(get_db)):
 
 
 @router.post("/rail/sim/control")
-async def control_rail_sim(body: dict, db: Session = Depends(get_db)):
+def control_rail_sim(body: dict, db: Session = Depends(get_db)):
     from rail_freight_simulator import simulator
     action = body.get("action")
     if action == "pause":
@@ -448,7 +449,7 @@ async def control_rail_sim(body: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/rail/env/event")
-async def trigger_rail_env_event(body: dict, db: Session = Depends(get_db)):
+def trigger_rail_env_event(body: dict, db: Session = Depends(get_db)):
     """手动注入铁路环境事件（track_closure/signal/mechanical/weather）。"""
     from datetime import timedelta
     from rail_freight_simulator import simulator
@@ -474,7 +475,7 @@ async def trigger_rail_env_event(body: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/rail/env/events")
-async def get_rail_env_events(db: Session = Depends(get_db)):
+def get_rail_env_events(db: Session = Depends(get_db)):
     rows = db.query(RailSegment).filter(RailSegment.condition != "clear").all()
     return {"count": len(rows), "events": [{"event_type": s.condition, "location": s.origin,
             "severity": "moderate", "description": s.description,

@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 @router.get("/sea/ports")
-async def get_ports(db: Session = Depends(get_db)):
+def get_ports(db: Session = Depends(get_db)):
     """Get NZ port list."""
     ports = db.query(SeaPort).all()
     return {
@@ -37,7 +37,7 @@ async def get_ports(db: Session = Depends(get_db)):
 
 
 @router.get("/sea/vessels")
-async def get_vessels(
+def get_vessels(
     port: Optional[str] = None,
     status: Optional[str] = None,
     vessel_type: Optional[str] = None,
@@ -81,7 +81,7 @@ async def get_vessels(
 
 
 @router.get("/sea/containers")
-async def get_containers(
+def get_containers(
     direction: Optional[str] = None,
     status: Optional[str] = None,
     customer_tier: Optional[str] = None,
@@ -127,7 +127,7 @@ async def get_containers(
 
 
 @router.get("/sea/containers/{container_number}")
-async def get_container_detail(container_number: str, db: Session = Depends(get_db)):
+def get_container_detail(container_number: str, db: Session = Depends(get_db)):
     """Get detailed container information including events and exceptions."""
     container = db.query(SeaContainer).filter(
         SeaContainer.container_number == container_number).first()
@@ -256,7 +256,7 @@ async def get_container_detail(container_number: str, db: Session = Depends(get_
 
 
 @router.get("/sea/containers/{container_number}/lines")
-async def get_container_lines(container_number: str, db: Session = Depends(get_db)):
+def get_container_lines(container_number: str, db: Session = Depends(get_db)):
     """List the individual cargo lines (consignments) inside a container."""
     lines = db.query(CargoLine).filter(
         CargoLine.container_number == container_number
@@ -289,7 +289,7 @@ async def get_container_lines(container_number: str, db: Session = Depends(get_d
 
 
 @router.get("/sea/exceptions")
-async def get_sea_exceptions(
+def get_sea_exceptions(
     exception_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
@@ -343,7 +343,7 @@ async def get_sea_exceptions(
 
 
 @router.get("/sea/exceptions/{exception_id}")
-async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_db)):
+def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_db)):
     """Get a single exception with full detail for the four-step AI pipeline view."""
     exc = db.query(SeaException).filter(SeaException.exception_id == exception_id).first()
     if not exc:
@@ -417,6 +417,7 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
         "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
         "close_evidence": exc.close_evidence,
         "reopen_count": exc.reopen_count,
+        "escalation_reason": exc.escalation_reason,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "container_number": container.container_number if container else exc.container_number,
@@ -458,7 +459,7 @@ async def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_
 
 
 @router.post("/sea/exceptions/{exception_id}/decision")
-async def decide_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def decide_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """协调员审批/驳回/修改 AI 建议（body: decided_by, decision, chosen_action, note, actual_cost, actual_recovery_hours）。"""
     from decision_models import record_decision
     from world.clock import world_clock
@@ -484,7 +485,7 @@ async def decide_sea_exception(exception_id: str, body: dict, db: Session = Depe
 
 
 @router.post("/sea/exceptions/{exception_id}/disposition")
-async def disposition_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def disposition_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工确认/标记误报/重复/数据问题（EVT-006）：body={disposition: confirmed|false_positive|duplicate|data_issue, note, by}。"""
     from exception_ops import set_disposition
     from world.clock import world_clock
@@ -497,7 +498,7 @@ async def disposition_sea_exception(exception_id: str, body: dict, db: Session =
 
 
 @router.post("/sea/exceptions/{exception_id}/close")
-async def close_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def close_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工结案（MON-005）：body={evidence, note}。"""
     from exception_ops import close_exception
     from world.clock import world_clock
@@ -510,7 +511,7 @@ async def close_sea_exception(exception_id: str, body: dict, db: Session = Depen
 
 
 @router.post("/sea/exceptions/{exception_id}/reopen")
-async def reopen_sea_exception(exception_id: str, db: Session = Depends(get_db)):
+def reopen_sea_exception(exception_id: str, db: Session = Depends(get_db)):
     """重新打开案件（二次异常，MON-005）。"""
     from exception_ops import reopen_exception
     from world.clock import world_clock
@@ -523,7 +524,7 @@ async def reopen_sea_exception(exception_id: str, db: Session = Depends(get_db))
 
 
 @router.post("/sea/exceptions")
-async def create_sea_exception(body: dict, db: Session = Depends(get_db)):
+def create_sea_exception(body: dict, db: Session = Depends(get_db)):
     """人工创建异常（EVT-006）：body={reference, exception_type, root_cause, diagnosis, note}。"""
     from exception_ops import create_manual_exception
     from world.clock import world_clock
@@ -536,7 +537,7 @@ async def create_sea_exception(body: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/sea/dashboard")
-async def get_sea_dashboard(db: Session = Depends(get_db)):
+def get_sea_dashboard(db: Session = Depends(get_db)):
     """Get sea freight operations dashboard summary."""
     total_containers = db.query(SeaContainer).count()
     imports = db.query(SeaContainer).filter(SeaContainer.direction == "import").count()
@@ -587,7 +588,7 @@ async def get_sea_dashboard(db: Session = Depends(get_db)):
 
 
 @router.get("/sea/kpi")
-async def get_sea_kpi(db: Session = Depends(get_db)):
+def get_sea_kpi(db: Session = Depends(get_db)):
     """Get sea freight exception-management KPIs (Kratos Task 12)."""
     total = db.query(SeaException).count()
     if total == 0:
@@ -630,7 +631,7 @@ async def get_sea_kpi(db: Session = Depends(get_db)):
 
 
 @router.get("/sea/notifications")
-async def get_sea_notifications(limit: int = 20, db: Session = Depends(get_db)):
+def get_sea_notifications(limit: int = 20, db: Session = Depends(get_db)):
     """Get proactive customer notifications for sea freight exceptions."""
     from notification_models import ExceptionNotification
     notifs = db.query(ExceptionNotification).filter(
@@ -660,7 +661,7 @@ async def get_sea_notifications(limit: int = 20, db: Session = Depends(get_db)):
 
 
 @router.get("/sea/live")
-async def get_sea_live(db: Session = Depends(get_db)):
+def get_sea_live(db: Session = Depends(get_db)):
     """Get live sea freight simulation status and recent activity."""
     from sea_freight_simulator import simulator
 
@@ -724,7 +725,7 @@ async def get_sea_live(db: Session = Depends(get_db)):
 
 
 @router.post("/sea/sim/control")
-async def control_sea_sim(body: dict, db: Session = Depends(get_db)):
+def control_sea_sim(body: dict, db: Session = Depends(get_db)):
     """Control the live sea freight simulator."""
     from sea_freight_simulator import simulator
 
@@ -752,7 +753,7 @@ async def control_sea_sim(body: dict, db: Session = Depends(get_db)):
     }
 
 @router.post("/sea/env/event")
-async def trigger_sea_env_event(body: dict, db: Session = Depends(get_db)):
+def trigger_sea_env_event(body: dict, db: Session = Depends(get_db)):
     """手动注入一个环境事件（用于演示特定场景，如"奥克兰港拥堵"）"""
     from datetime import timedelta
     from environment_events import EVENT_TEMPLATES, SEA_LOCATIONS
@@ -791,7 +792,7 @@ async def trigger_sea_env_event(body: dict, db: Session = Depends(get_db)):
     }
 
 @router.get("/sea/env/events")
-async def get_sea_freight_env_events(db: Session = Depends(get_db)):
+def get_sea_freight_env_events(db: Session = Depends(get_db)):
     """查活跃环境事件（实时路况通报）"""
     from environment_models import EnvironmentEvent
     from sea_freight_simulator import simulator

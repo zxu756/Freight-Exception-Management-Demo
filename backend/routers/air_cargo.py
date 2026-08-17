@@ -17,7 +17,7 @@ router = APIRouter()
 
 
 @router.get("/air/airports")
-async def get_airports(
+def get_airports(
     region: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
@@ -54,7 +54,7 @@ async def get_airports(
 
 
 @router.get("/air/flights")
-async def get_flights(
+def get_flights(
     status: Optional[str] = None,
     origin: Optional[str] = None,
     destination: Optional[str] = None,
@@ -109,7 +109,7 @@ async def get_flights(
 
 
 @router.get("/air/waybills")
-async def get_waybills(
+def get_waybills(
     route_type: Optional[str] = None,
     status: Optional[str] = None,
     customer_tier: Optional[str] = None,
@@ -170,7 +170,7 @@ async def get_waybills(
 
 
 @router.get("/air/waybills/{awb_number}")
-async def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
+def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
     """
     Get detailed air waybill information.
 
@@ -319,7 +319,7 @@ async def get_waybill_detail(awb_number: str, db: Session = Depends(get_db)):
 
 
 @router.get("/air/waybills/{awb_number}/house-bills")
-async def get_house_waybills(awb_number: str, db: Session = Depends(get_db)):
+def get_house_waybills(awb_number: str, db: Session = Depends(get_db)):
     """List the house waybills (HAWB consignments) inside a master waybill."""
     bills = db.query(HouseWaybill).filter(
         HouseWaybill.awb_number == awb_number
@@ -352,7 +352,7 @@ async def get_house_waybills(awb_number: str, db: Session = Depends(get_db)):
 
 
 @router.get("/air/exceptions")
-async def get_air_exceptions(
+def get_air_exceptions(
     exception_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
@@ -416,7 +416,7 @@ async def get_air_exceptions(
 
 
 @router.get("/air/exceptions/{exception_id}")
-async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_db)):
+def get_air_exception_detail(exception_id: str, db: Session = Depends(get_db)):
     """Get a single exception with full detail for the four-step AI pipeline view."""
     exc = db.query(AirException).filter(AirException.exception_id == exception_id).first()
     if not exc:
@@ -490,6 +490,7 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
         "closed_at": exc.closed_at.isoformat() if exc.closed_at else None,
         "close_evidence": exc.close_evidence,
         "reopen_count": exc.reopen_count,
+        "escalation_reason": exc.escalation_reason,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "awb_number": waybill.awb_number if waybill else exc.awb_number,
@@ -530,7 +531,7 @@ async def get_air_exception_detail(exception_id: str, db: Session = Depends(get_
 
 
 @router.post("/air/exceptions/{exception_id}/decision")
-async def decide_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def decide_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """协调员审批/驳回/修改 AI 建议（body: decided_by, decision, chosen_action, note, actual_cost, actual_recovery_hours）。"""
     from decision_models import record_decision
     from world.clock import world_clock
@@ -556,7 +557,7 @@ async def decide_air_exception(exception_id: str, body: dict, db: Session = Depe
 
 
 @router.post("/air/exceptions/{exception_id}/disposition")
-async def disposition_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def disposition_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工确认/标记误报/重复/数据问题（EVT-006）。"""
     from exception_ops import set_disposition
     from world.clock import world_clock
@@ -569,7 +570,7 @@ async def disposition_air_exception(exception_id: str, body: dict, db: Session =
 
 
 @router.post("/air/exceptions/{exception_id}/close")
-async def close_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+def close_air_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
     """人工结案（MON-005）。"""
     from exception_ops import close_exception
     from world.clock import world_clock
@@ -582,7 +583,7 @@ async def close_air_exception(exception_id: str, body: dict, db: Session = Depen
 
 
 @router.post("/air/exceptions/{exception_id}/reopen")
-async def reopen_air_exception(exception_id: str, db: Session = Depends(get_db)):
+def reopen_air_exception(exception_id: str, db: Session = Depends(get_db)):
     """重新打开案件。"""
     from exception_ops import reopen_exception
     from world.clock import world_clock
@@ -595,7 +596,7 @@ async def reopen_air_exception(exception_id: str, db: Session = Depends(get_db))
 
 
 @router.post("/air/exceptions")
-async def create_air_exception(body: dict, db: Session = Depends(get_db)):
+def create_air_exception(body: dict, db: Session = Depends(get_db)):
     """人工创建异常（EVT-006）。"""
     from exception_ops import create_manual_exception
     from world.clock import world_clock
@@ -608,7 +609,7 @@ async def create_air_exception(body: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/air/dashboard")
-async def get_air_dashboard(db: Session = Depends(get_db)):
+def get_air_dashboard(db: Session = Depends(get_db)):
     """
     Get air cargo operations dashboard summary.
 
@@ -668,7 +669,7 @@ async def get_air_dashboard(db: Session = Depends(get_db)):
 
 
 @router.get("/air/kpi")
-async def get_air_kpi(db: Session = Depends(get_db)):
+def get_air_kpi(db: Session = Depends(get_db)):
     """Get air cargo exception-management KPIs (Kratos Task 12)."""
     total = db.query(AirException).count()
     if total == 0:
@@ -710,7 +711,7 @@ async def get_air_kpi(db: Session = Depends(get_db)):
 
 
 @router.get("/air/notifications")
-async def get_air_notifications(limit: int = 20, db: Session = Depends(get_db)):
+def get_air_notifications(limit: int = 20, db: Session = Depends(get_db)):
     """Get proactive customer notifications for air cargo exceptions."""
     from notification_models import ExceptionNotification
     notifs = db.query(ExceptionNotification).filter(
@@ -740,7 +741,7 @@ async def get_air_notifications(limit: int = 20, db: Session = Depends(get_db)):
 
 
 @router.get("/air/live")
-async def get_air_live(db: Session = Depends(get_db)):
+def get_air_live(db: Session = Depends(get_db)):
     """
     Get live air cargo simulation status and recent activity.
     获取实时空运模拟状态与近期动态
@@ -842,7 +843,7 @@ async def get_air_live(db: Session = Depends(get_db)):
 
 
 @router.post("/air/sim/control")
-async def control_air_sim(body: dict, db: Session = Depends(get_db)):
+def control_air_sim(body: dict, db: Session = Depends(get_db)):
     """
     Control the live air cargo simulator.
 
@@ -878,7 +879,7 @@ async def control_air_sim(body: dict, db: Session = Depends(get_db)):
     }
 
 @router.post("/air/env/event")
-async def trigger_air_env_event(body: dict, db: Session = Depends(get_db)):
+def trigger_air_env_event(body: dict, db: Session = Depends(get_db)):
     """手动注入一个环境事件（用于演示特定场景，如"皇后镇大雾"）"""
     from datetime import timedelta
     from environment_events import EVENT_TEMPLATES, AIR_LOCATIONS
@@ -917,7 +918,7 @@ async def trigger_air_env_event(body: dict, db: Session = Depends(get_db)):
     }
 
 @router.get("/air/env/events")
-async def get_air_cargo_env_events(db: Session = Depends(get_db)):
+def get_air_cargo_env_events(db: Session = Depends(get_db)):
     """查活跃环境事件（实时路况通报）"""
     from environment_models import EnvironmentEvent
     from air_cargo_simulator import simulator

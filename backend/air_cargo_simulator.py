@@ -416,7 +416,10 @@ class AirCargoSimulator:
         """
         db = SessionLocal()
         try:
-            flights = db.query(AirFlight).filter(AirFlight.status != "cancelled").all()
+            flights = db.query(AirFlight).filter(
+                AirFlight.status != "cancelled",
+                AirFlight.scheduled_departure >= self.sim_now - timedelta(hours=48),
+            ).all()
             for flight in flights:
                 eff_dep = flight.scheduled_departure + timedelta(minutes=flight.delay_minutes or 0)
                 eff_arr = flight.scheduled_arrival + timedelta(minutes=flight.delay_minutes or 0)
@@ -832,7 +835,7 @@ class AirCargoSimulator:
 
     def _process_pending(self, db):
         # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
-        budget = 300
+        budget = 1000
         while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
             _, _, kind, payload = heapq.heappop(self._pending)
@@ -1110,6 +1113,8 @@ class AirCargoSimulator:
                 )
 
     def _create_exception(self, db, waybill, exc_type, root_cause, delay_hours, diagnosis, recovery, reason_code=None, hawb=None):
+        from exception_ops import reopen_if_closed
+        reopen_if_closed(db, "air", waybill.awb_number, self.sim_now)
         # 票级（HAWB）异常时用分运单的货物字段，通知只发给该票货主
         _value = hawb.declared_value_nzd if hawb else waybill.declared_value_nzd
         _tier = hawb.customer_tier if hawb else waybill.customer_tier
