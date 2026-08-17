@@ -442,7 +442,14 @@ def get_rail_live(db: Session = Depends(get_db)):
                                  "is_ood": x.is_ood}
                                 for x in db.query(RailException).filter(
                                     RailException.status.notin_(["resolved", "closed"])).order_by(
-                                    RailException.risk_score.desc()).limit(50).all()]}
+                                    RailException.risk_score.desc()).limit(50).all()],
+            "recent_events": [{"event_code": e.event_code, "event_desc": e.event_desc,
+                               "consignment_number": e.consignment_number,
+                               "location": e.location,
+                               "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                               "reason_code": e.reason_code}
+                              for e in db.query(RailTrackingEvent).order_by(
+                                  RailTrackingEvent.timestamp.desc()).limit(20).all()]}
 
 
 @router.post("/rail/sim/control")
