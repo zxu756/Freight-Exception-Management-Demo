@@ -353,14 +353,14 @@ class RailFreightSimulator:
     # ---------------- pending event processing ----------------
     def _process_pending(self, db):
         import time as _time
-        budget = 600
+        budget = 150
         processed = 0
         _t0 = _time.monotonic()
-        while budget > 0 and (_time.monotonic() - _t0) < 20.0 and self._pending and self._pending[0][0] <= self.sim_now:
+        while budget > 0 and (_time.monotonic() - _t0) < 5.0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
             processed += 1
-            # 每 200 个事件提交一次：防止单个 tick 的事务过大长时间占住 SQLite 写锁（世界冻结根因）
-            if processed % 200 == 0:
+            # 每 50 个事件提交一次：单个 tick 的写锁占用不超过数秒（前端 3s 轮询不撞死窗）
+            if processed % 50 == 0:
                 db.commit()
             ts, _seq, kind, payload = heapq.heappop(self._pending)
             if kind == "DPT":
