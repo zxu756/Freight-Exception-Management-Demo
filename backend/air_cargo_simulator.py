@@ -835,9 +835,16 @@ class AirCargoSimulator:
 
     def _process_pending(self, db):
         # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
-        budget = 1000
-        while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
+        import time as _time
+        budget = 600
+        processed = 0
+        _t0 = _time.monotonic()
+        while budget > 0 and (_time.monotonic() - _t0) < 20.0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
+            processed += 1
+            # 每 200 个事件提交一次：防止单个 tick 的事务过大长时间占住 SQLite 写锁（世界冻结根因）
+            if processed % 200 == 0:
+                db.commit()
             _, _, kind, payload = heapq.heappop(self._pending)
             try:
                 handler = getattr(self, f"_on_{kind}")

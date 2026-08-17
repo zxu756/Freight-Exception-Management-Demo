@@ -418,6 +418,7 @@ def get_sea_exception_detail(exception_id: str, db: Session = Depends(get_db)):
         "close_evidence": exc.close_evidence,
         "reopen_count": exc.reopen_count,
         "escalation_reason": exc.escalation_reason,
+        "assignee": exc.assignee,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "container_number": container.container_number if container else exc.container_number,
@@ -535,6 +536,18 @@ def create_sea_exception(body: dict, db: Session = Depends(get_db)):
     return {"success": True, "exception_type": exc_type, "reference": reference,
             "message": "manual exception created and customer notified"}
 
+
+
+@router.post("/sea/exceptions/{exception_id}/assign")
+def assign_sea_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """责任分配（EXC-004）：body={assignee, by}。"""
+    from exception_ops import assign_exception
+    from world.clock import world_clock
+    try:
+        exc = assign_exception(db, "sea", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "assignee": exc.assignee}
 
 @router.get("/sea/dashboard")
 def get_sea_dashboard(db: Session = Depends(get_db)):

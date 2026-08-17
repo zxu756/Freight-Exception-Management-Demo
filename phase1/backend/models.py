@@ -89,3 +89,13 @@ class Decision(Base):
     chosen_action = Column(String(50), nullable=True)
     note = Column(Text, nullable=True)
     decided_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Employee(Base):
+    __tablename__ = "employees"
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(String(20), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    role = Column(String(50), nullable=False)
+    email = Column(String(100), nullable=True)
+    department = Column(String(50), nullable=True)

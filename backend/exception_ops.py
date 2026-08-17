@@ -10,12 +10,8 @@ DISPOSITIONS = ("confirmed", "false_positive", "duplicate", "data_issue")
 
 
 def _locked(fn):
-    """API 路径与模拟器线程共用写锁，避免 sqlite database is locked。"""
-    from database import WRITE_LOCK
-    def wrapper(*args, **kwargs):
-        with WRITE_LOCK:
-            return fn(*args, **kwargs)
-    return wrapper
+    """（保留占位：曾用 WRITE_LOCK 包裹，已改为依赖 SQLite busy_timeout，避免线程锁引发卡顿）"""
+    return fn
 
 
 def _exception_model(mode):
@@ -69,6 +65,9 @@ def set_disposition(db, mode, exception_id, body, now):
     exc.disposition_at = now
     exc.status = "closed"
     exc.closed_at = now
+    from workflow_models import log_audit
+    log_audit(db, name, "disposition", now, mode=mode, exception_id=exception_id,
+              field="disposition", new_value=disposition, note=body.get("note"))
     db.commit()
     return exc
 
@@ -87,6 +86,9 @@ def close_exception(db, mode, exception_id, body, now):
     exc.close_evidence = body.get("evidence") or body.get("note")
     exc.disposition = exc.disposition or "confirmed"
     exc.disposition_by = exc.disposition_by or name
+    from workflow_models import log_audit
+    log_audit(db, name, "close", now, mode=mode, exception_id=exception_id,
+              field="status", new_value="closed", note=exc.close_evidence)
     db.commit()
     return exc
 
@@ -100,9 +102,12 @@ def reopen_exception(db, mode, exception_id, now):
         raise ValueError("exception not found")
     from admin_models import require_role
     require_role(db, "reopen", {"by": "Coordinator"})
+    from workflow_models import log_audit
     exc.status = "reopened"
     exc.reopen_count = (exc.reopen_count or 0) + 1
     exc.closed_at = None
+    log_audit(db, "Coordinator", "reopen", now, mode=mode, exception_id=exception_id,
+              field="status", new_value="reopened", note=f"reopen_count={exc.reopen_count}")
     db.commit()
     return exc
 
@@ -125,6 +130,25 @@ def reopen_if_closed(db, mode, reference, now):
 
 
 @_locked
+@_locked
+def assign_exception(db, mode, exception_id, body, now):
+    """责任分配（EXC-004）：body={assignee, by}。"""
+    from admin_models import require_role, get_user
+    from workflow_models import log_audit
+    _actor, _role = require_role(db, "disposition", body)
+    cls = _exception_model(mode)
+    exc = db.query(cls).filter(cls.exception_id == exception_id).first()
+    if not exc:
+        raise ValueError("exception not found")
+    assignee = (body.get("assignee") or "").strip()
+    u = get_user(db, assignee)
+    exc.assignee = u.name if u else (assignee or None)
+    log_audit(db, _actor, "assign", now, mode=mode, exception_id=exception_id,
+              field="assignee", new_value=exc.assignee)
+    db.commit()
+    return exc
+
+
 def create_manual_exception(db, mode, body, now):
     """人工创建异常：绑定现有装载单元，走完整风险/分类/方案/通知流程。"""
     reference = (body.get("reference") or "").strip()
@@ -134,7 +158,7 @@ def create_manual_exception(db, mode, body, now):
     if not parent:
         raise ValueError(f"parent unit not found: {reference}")
     from admin_models import require_role
-    require_role(db, "create_exception", body)
+    _actor, _role = require_role(db, "create_exception", body)
     exc_type = body.get("exception_type") or "delay"
     root_cause = (body.get("root_cause") or f"Manual exception created for {reference}").strip()
     diagnosis = body.get("diagnosis") or body.get("note") or root_cause
@@ -159,5 +183,9 @@ def create_manual_exception(db, mode, body, now):
         sim._create_exception(db, parent, exc_type, root_cause, 0.0, diagnosis, recovery)
     else:
         raise ValueError(f"unknown mode: {mode}")
+    from workflow_models import log_audit
+    log_audit(db, _actor, "create_exception", now or datetime.utcnow(),
+              mode=mode, reference=reference, field="exception_type", new_value=exc_type,
+              note=root_cause)
     db.commit()
     return exc_type, reference

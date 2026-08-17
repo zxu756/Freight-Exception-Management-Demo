@@ -448,6 +448,7 @@ def get_road_exception_detail(exception_id: str, db: Session = Depends(get_db)):
         "close_evidence": exc.close_evidence,
         "reopen_count": exc.reopen_count,
         "escalation_reason": exc.escalation_reason,
+        "assignee": exc.assignee,
         "detected_at": exc.detected_at.isoformat(),
         "cargo": {
             "consignment_number": cons.consignment_number if cons else exc.consignment_number,
@@ -564,6 +565,18 @@ def create_road_exception(body: dict, db: Session = Depends(get_db)):
     return {"success": True, "exception_type": exc_type, "reference": reference,
             "message": "manual exception created and customer notified"}
 
+
+
+@router.post("/road/exceptions/{exception_id}/assign")
+def assign_road_exception(exception_id: str, body: dict, db: Session = Depends(get_db)):
+    """责任分配（EXC-004）：body={assignee, by}。"""
+    from exception_ops import assign_exception
+    from world.clock import world_clock
+    try:
+        exc = assign_exception(db, "road", exception_id, body, world_clock.now)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"success": True, "exception_id": exc.exception_id, "assignee": exc.assignee}
 
 @router.get("/road/dashboard")
 def get_road_dashboard(db: Session = Depends(get_db)):

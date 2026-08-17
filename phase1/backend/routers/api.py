@@ -5,8 +5,9 @@ from typing import Optional
 from datetime import datetime
 
 from database import get_db
-from models import Port, Vessel, Container, TrackingEvent, Exception, Notification, Decision
+from models import Port, Vessel, Container, TrackingEvent, Exception, Notification, Decision, Employee
 from detector import detect_exceptions, generate_diagnosis, calculate_risk_score, determine_severity
+from advisor import generate_advice, generate_quick_response, estimate_recovery_cost
 
 router = APIRouter()
 
@@ -306,3 +307,102 @@ async def run_detection(db: Session = Depends(get_db)):
     
     db.commit()
     return {"success": True, "containers_scanned": len(containers), "new_exceptions": new_exceptions}
+
+
+@router.get("/advice/{exception_id}")
+async def get_advice(exception_id: str, db: Session = Depends(get_db)):
+    """获取异常处理建议"""
+    exc = db.query(Exception).filter(Exception.exception_id == exception_id).first()
+    if not exc:
+        raise HTTPException(status_code=404, detail="Exception not found")
+    
+    container = db.query(Container).filter(Container.container_number == exc.container_number).first()
+    
+    container_info = {
+        "container_number": exc.container_number,
+        "customer_name": container.customer_name if container else "Unknown",
+        "customer_tier": container.customer_tier if container else "medium",
+        "declared_value_nzd": container.declared_value_nzd if container else 0,
+    }
+    
+    exception_info = {
+        "exception_type": exc.exception_type,
+        "severity": exc.severity,
+        "risk_score": exc.risk_score,
+        "root_cause": exc.root_cause,
+    }
+    
+    advice = generate_advice(exc.exception_type, container_info, exception_info)
+    quick_response = generate_quick_response(exc.exception_type, exc.severity, exc.risk_score)
+    estimated_cost = estimate_recovery_cost(exc.exception_type, container_info["declared_value_nzd"])
+    
+    return {
+        "exception_id": exception_id,
+        "advice": advice,
+        "quick_response": quick_response,
+        "estimated_recovery_cost": estimated_cost,
+    }
+
+
+@router.get("/advice/quick/{exception_type}")
+async def get_quick_advice(exception_type: str, severity: str = "medium", risk_score: int = 50):
+    """快速获取某类异常的建议模板"""
+    quick_response = generate_quick_response(exception_type, severity, risk_score)
+    templates = {
+        "delay": [
+            {"title": "联系客户更新ETA", "action": "立即联系客户告知延误", "priority": "high", "estimated_cost": 0},
+            {"title": "改订船期", "action": "联系船公司改订", "priority": "medium", "estimated_cost": 500},
+        ],
+        "customs_hold": [
+            {"title": "补充单证", "action": "联系发货人提供完整单证", "priority": "high", "estimated_cost": 0},
+            {"title": "联系报关行", "action": "加急处理清关", "priority": "high", "estimated_cost": 200},
+        ],
+        "damage": [
+            {"title": "安排检验", "action": "联系保险公司安排检验", "priority": "high", "estimated_cost": 400},
+            {"title": "拍照取证", "action": "对损坏货物拍照", "priority": "high", "estimated_cost": 0},
+        ],
+        "misroute": [
+            {"title": "纠正路由", "action": "联系承运人纠正路由", "priority": "high", "estimated_cost": 300},
+            {"title": "拦截货物", "action": "在下一节点拦截", "priority": "high", "estimated_cost": 200},
+        ],
+    }
+    
+    return {
+        "exception_type": exception_type,
+        "quick_response": quick_response,
+        "advice_templates": templates.get(exception_type, templates["delay"]),
+    }
+
+
+@router.get("/employees")
+async def get_employees(db: Session = Depends(get_db)):
+    """获取员工列表"""
+    items = db.query(Employee).all()
+    return {
+        "count": len(items),
+        "employees": [
+            {
+                "employee_id": e.employee_id,
+                "name": e.name,
+                "role": e.role,
+                "email": e.email,
+                "department": e.department,
+            }
+            for e in items
+        ],
+    }
+
+
+@router.get("/employees/{employee_id}")
+async def get_employee(employee_id: str, db: Session = Depends(get_db)):
+    """获取员工详情"""
+    e = db.query(Employee).filter(Employee.employee_id == employee_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return {
+        "employee_id": e.employee_id,
+        "name": e.name,
+        "role": e.role,
+        "email": e.email,
+        "department": e.department,
+    }

@@ -2,7 +2,7 @@
 import random
 from datetime import datetime, timedelta
 from database import SessionLocal
-from models import Port, Vessel, Container, TrackingEvent, Exception, Notification
+from models import Port, Vessel, Container, TrackingEvent, Exception, Notification, Employee
 
 
 def seed_data():
@@ -12,6 +12,16 @@ def seed_data():
     if db.query(Port).count() > 0:
         db.close()
         return
+    
+    # Employees
+    employees = [
+        ("EMP-001", "Sarah Chen", "Operations Coordinator", "sarah.chen@southernfreight.co.nz", "Operations"),
+        ("EMP-002", "James Wilson", "Senior Coordinator", "james.wilson@southernfreight.co.nz", "Operations"),
+        ("EMP-003", "Emma Thompson", "Operations Manager", "emma.thompson@southernfreight.co.nz", "Management"),
+        ("EMP-004", "Michael Brown", "Logistics Specialist", "michael.brown@southernfreight.co.nz", "Operations"),
+    ]
+    for eid, name, role, email, dept in employees:
+        db.add(Employee(employee_id=eid, name=name, role=role, email=email, department=dept))
     
     # Ports
     ports = [

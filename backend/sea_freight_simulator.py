@@ -109,7 +109,9 @@ class SeaFreightSimulator:
             try:
                 generate_ports(db)
                 self._load_vessel_visits(db)
-                if backfill:
+                # 非全新库时启动不做船舶窗口回填（防止单个大事务长时间占写锁导致世界冻结）；
+                # 每 6 模拟小时的持续生成会自然补齐。
+                if backfill and db.query(SeaContainer).count() == 0:
                     self._backfill(db)
                 self._backfill_cargo_lines(db)
             finally:
@@ -271,8 +273,10 @@ class SeaFreightSimulator:
             VesselVisit.arrival_datetime <= hi,
         ).all()
         done_visits = {r[0] for r in db.query(SeaContainer.vessel_visit_id).all()}
-        for visit in visits:
+        for i, visit in enumerate(visits):
             self._generate_containers_for_visit(db, visit, done_visits)
+            if i % 50 == 0:
+                db.commit()  # 分块提交，缩短写锁占用窗口
 
     def _generate_containers_for_visit(self, db, visit, done_visits=None):
         if visit.vessel_visit_id in self._generated_vessels:
@@ -511,9 +515,16 @@ class SeaFreightSimulator:
 
     def _process_pending(self, db):
         # 每 tick 最多处理 300 个到期事件：时钟大跳/重启后积压分批消化，避免单 tick 卡死
-        budget = 1000
-        while budget > 0 and self._pending and self._pending[0][0] <= self.sim_now:
+        import time as _time
+        budget = 600
+        processed = 0
+        _t0 = _time.monotonic()
+        while budget > 0 and (_time.monotonic() - _t0) < 20.0 and self._pending and self._pending[0][0] <= self.sim_now:
             budget -= 1
+            processed += 1
+            # 每 200 个事件提交一次：防止单个 tick 的事务过大长时间占住 SQLite 写锁（世界冻结根因）
+            if processed % 200 == 0:
+                db.commit()
             _, _, kind, payload = heapq.heappop(self._pending)
             try:
                 handler = getattr(self, f"_on_{kind}")

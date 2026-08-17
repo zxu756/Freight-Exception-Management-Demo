@@ -52,3 +52,30 @@ select, input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; f
 .detail-value { color: #333; }
 
 .loading { text-align: center; padding: 40px; color: #666; }
+
+/* Advice Section */
+.advice-section { margin-top: 20px; border-top: 2px solid #eee; padding-top: 16px; }
+.advice-section h3 { font-size: 16px; color: #1a365d; margin-bottom: 16px; }
+.advice-section h4 { font-size: 14px color: #555; margin-bottom: 12px; }
+
+.quick-response { background: #f8f9fa; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.quick-response h4 { margin-top: 0; }
+
+.advice-card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.advice-card.priority-high { border-left: 4px solid #e53e3e; }
+.advice-card.priority-medium { border-left: 4px solid #dd6b20; }
+.advice-card.priority-low { border-left: 4px solid #38a169; }
+
+.advice-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.advice-title { font-weight: 600; color: #333; }
+.advice-action { color: #555; font-size: 14px; margin-bottom: 4px; }
+.advice-reason { color: #666; font-size: 12px; font-style: italic; }
+.advice-meta { display: flex; gap: 12px; margin-top: 8px; font-size: 12px; }
+.advice-meta .cost { color: #e53e3e; }
+.advice-meta .time { color: #38a169; }
+.advice-meta .approval { color: #dd6b20; background: #fff3cd; padding: 2px 6px; border-radius: 4px; }
+
+.advice-summary { background: #edf2f7; border-radius: 8px; padding: 16px; margin-top: 16px; }
+
+.full-width { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+.employee-info { line-height: 1.6; }

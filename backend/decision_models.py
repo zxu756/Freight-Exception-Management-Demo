@@ -186,6 +186,15 @@ def record_decision(db, mode, exception_id, body, now):
     elif decision == "reject":
         bump(recommended, 0, 1)
 
+    from workflow_models import log_audit, create_instruction
+    log_audit(db, decided_by, "decision", now, mode=mode, exception_id=exception_id,
+              reference=_ref, field="status", old_value=_prev_status, new_value="resolved",
+              note=f"decision={decision}, chosen={chosen}")
+    if decision in ("approve", "modify") and chosen:
+        _ins = create_instruction(db, mode, exception_id, _ref,
+                                  body.get("carrier") or "TBC", chosen, now)
+        log_audit(db, decided_by, "instruction", now, mode=mode, exception_id=exception_id,
+                  reference=_ref, field="instruction_id", new_value=_ins.instruction_id)
     db.commit()
     return row, exc
 

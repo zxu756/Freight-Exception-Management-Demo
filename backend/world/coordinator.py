@@ -53,6 +53,7 @@ class WorldSimulator:
 
         self.running = True
         self._stop_event.clear()
+        self._last_maintenance = world_clock.now  # 启动首个 tick 不立即跑维护（启动期以回填为主）
         self._thread = threading.Thread(target=self._run, name="world-sim", daemon=True)
         self._thread.start()
         print(f"[world] coordinator started with {len(self.engines)} engines")

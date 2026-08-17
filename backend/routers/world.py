@@ -721,6 +721,170 @@ def batch_notify_network_event(event_id: int, body: dict, db: Session = Depends(
             "notifications_approved": approved}
 
 
+@router.get("/world/audit")
+def get_world_audit(
+    mode: Optional[str] = None,
+    exception_id: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """审计日志（ADM-006）：决策/处置/关闭/重开/审核/报价/TMS 回写全留痕。"""
+    from workflow_models import AuditLog
+    query = db.query(AuditLog)
+    if mode:
+        query = query.filter(AuditLog.mode == mode)
+    if exception_id:
+        query = query.filter(AuditLog.exception_id == exception_id)
+    rows = query.order_by(AuditLog.id.desc()).limit(limit).all()
+    return {
+        "count": len(rows),
+        "audit": [
+            {
+                "audit_id": a.audit_id, "actor": a.actor, "action": a.action,
+                "mode": a.mode, "exception_id": a.exception_id, "reference": a.reference,
+                "field": a.field, "old_value": a.old_value, "new_value": a.new_value,
+                "note": a.note,
+                "happened_at": a.happened_at.isoformat() if a.happened_at else None,
+            }
+            for a in rows
+        ],
+    }
+
+
+@router.get("/world/instructions")
+def get_world_instructions(
+    exception_id: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """承运商执行指令（EXE-002/003）。"""
+    from workflow_models import CarrierInstruction
+    query = db.query(CarrierInstruction)
+    if exception_id:
+        query = query.filter(CarrierInstruction.exception_id == exception_id)
+    rows = query.order_by(CarrierInstruction.id.desc()).limit(limit).all()
+    return {
+        "count": len(rows),
+        "instructions": [
+            {
+                "instruction_id": i.instruction_id, "mode": i.mode,
+                "exception_id": i.exception_id, "reference": i.reference,
+                "carrier": i.carrier, "action": i.action,
+                "instruction_text": i.instruction_text, "status": i.status,
+                "external_ref": i.external_ref, "final_cost_nzd": i.final_cost_nzd,
+                "confirmed_eta": i.confirmed_eta.isoformat() if i.confirmed_eta else None,
+                "sent_at": i.sent_at.isoformat() if i.sent_at else None,
+                "confirmed_at": i.confirmed_at.isoformat() if i.confirmed_at else None,
+            }
+            for i in rows
+        ],
+    }
+
+
+@router.post("/world/instructions/{instruction_id}/send")
+def send_instruction(instruction_id: str, body: dict, db: Session = Depends(get_db)):
+    """发送承运商指令（EXE-003 送达）。"""
+    from admin_models import require_role
+    from workflow_models import CarrierInstruction, log_audit
+    require_role(db, "quotes", body)
+    i = db.query(CarrierInstruction).filter(
+        CarrierInstruction.instruction_id == instruction_id).first()
+    if not i:
+        raise HTTPException(status_code=404, detail="instruction not found")
+    i.status = "sent"
+    i.sent_at = world_clock.now
+    log_audit(db, body.get("by") or "Coordinator", "instruction_send", world_clock.now,
+              mode=i.mode, exception_id=i.exception_id, reference=i.reference,
+              field="status", old_value="drafted", new_value="sent")
+    db.commit()
+    return {"success": True, "instruction_id": i.instruction_id, "status": i.status}
+
+
+@router.post("/world/instructions/{instruction_id}/confirm")
+def confirm_instruction(instruction_id: str, body: dict, db: Session = Depends(get_db)):
+    """承运商确认（EXE-004）：订舱号、最终费用、新 ETA。"""
+    from workflow_models import CarrierInstruction, log_audit
+    i = db.query(CarrierInstruction).filter(
+        CarrierInstruction.instruction_id == instruction_id).first()
+    if not i:
+        raise HTTPException(status_code=404, detail="instruction not found")
+    i.status = "confirmed"
+    i.external_ref = body.get("external_ref") or i.external_ref
+    i.final_cost_nzd = body.get("final_cost_nzd") if body.get("final_cost_nzd") is not None else i.final_cost_nzd
+    if body.get("confirmed_eta"):
+        try:
+            i.confirmed_eta = datetime.fromisoformat(body["confirmed_eta"].replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            pass
+    i.confirmed_at = world_clock.now
+    log_audit(db, body.get("by") or "Carrier", "instruction_confirm", world_clock.now,
+              mode=i.mode, exception_id=i.exception_id, reference=i.reference,
+              field="status", old_value="sent", new_value="confirmed",
+              note=f"ref={i.external_ref}, cost={i.final_cost_nzd}")
+    db.commit()
+    return {"success": True, "instruction_id": i.instruction_id, "status": i.status,
+            "external_ref": i.external_ref, "final_cost_nzd": i.final_cost_nzd}
+
+
+@router.post("/world/instructions/{instruction_id}/fail")
+def fail_instruction(instruction_id: str, body: dict, db: Session = Depends(get_db)):
+    """指令失败（EXE-003 失败/重试），可附原因。"""
+    from workflow_models import CarrierInstruction, log_audit
+    i = db.query(CarrierInstruction).filter(
+        CarrierInstruction.instruction_id == instruction_id).first()
+    if not i:
+        raise HTTPException(status_code=404, detail="instruction not found")
+    i.status = "failed"
+    log_audit(db, body.get("by") or "Coordinator", "instruction_fail", world_clock.now,
+              mode=i.mode, exception_id=i.exception_id, reference=i.reference,
+              field="status", new_value="failed", note=body.get("reason"))
+    db.commit()
+    return {"success": True, "instruction_id": i.instruction_id, "status": i.status}
+
+
+@router.get("/world/cost-closure")
+def get_cost_closure(exception_id: str, db: Session = Depends(get_db)):
+    """费用收口（MON-006）：估算恢复成本 vs 批准实际成本 vs 选中报价 vs SLA 违约金。"""
+    from quote_models import CarrierQuote
+    from workflow_models import CarrierInstruction
+    exc = None
+    mode = None
+    for cls_name in ("SeaException", "AirException", "RoadException", "RailException"):
+        if cls_name == "SeaException":
+            from sea_freight_models import SeaException as _C
+        elif cls_name == "AirException":
+            from air_cargo_models import AirException as _C
+        elif cls_name == "RoadException":
+            from road_freight_models import RoadException as _C
+        else:
+            from rail_freight_models import RailException as _C
+        exc = db.query(_C).filter(_C.exception_id == exception_id).first()
+        if exc:
+            mode = cls_name.replace("Exception", "").lower()
+            break
+    if not exc:
+        raise HTTPException(status_code=404, detail="exception not found")
+    selected = db.query(CarrierQuote).filter(
+        CarrierQuote.exception_id == exception_id,
+        CarrierQuote.status == "selected",
+    ).first()
+    inst = db.query(CarrierInstruction).filter(
+        CarrierInstruction.exception_id == exception_id,
+        CarrierInstruction.status == "confirmed",
+    ).first()
+    return {
+        "exception_id": exception_id,
+        "mode": mode,
+        "estimated_recovery_cost": exc.recovery_cost,
+        "approved_actual_cost": exc.actual_cost,
+        "quote_price_nzd": selected.price_nzd if selected else None,
+        "quote_surcharges_nzd": selected.surcharges_nzd if selected else None,
+        "carrier_confirmed_cost": inst.final_cost_nzd if inst else None,
+        "sla_penalty_nzd": getattr(exc, "sla_penalty_nzd", None),
+        "variance_estimate_vs_confirmed": round((inst.final_cost_nzd or 0) - (exc.recovery_cost or 0), 2) if inst else None,
+    }
+
+
 @router.post("/notifications/{notification_id}/delivery")
 def mark_notification_delivery(notification_id: str, body: dict, db: Session = Depends(get_db)):
     """外发 worker 回写真实送达状态（body: status=sent|failed|delivered, external_message_id?）。"""

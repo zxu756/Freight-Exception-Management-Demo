@@ -1,6 +1,11 @@
 """
 FastAPI main application entry point.
 """
+import faulthandler
+import signal
+
+# 诊断用：kill -USR1 <pid> 可在卡死时打印所有线程栈
+faulthandler.register(signal.SIGUSR1)
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +22,7 @@ import customer_models  # noqa: F401  # Register customer master data table
 import decision_models  # noqa: F401  # Register coordinator decision tables
 import quote_models  # noqa: F401  # Register carrier quote table
 import admin_models  # noqa: F401  # Register users table (RBAC)
+import workflow_models  # noqa: F401  # Register audit log + carrier instruction tables
 import world.maintenance  # noqa: F401  # Register carrier performance + metric snapshot tables
 import sla_models  # noqa: F401  # Register SLA policy table
 import environment_models  # noqa: F401  # Register environmental event table
@@ -164,6 +170,8 @@ def _migrate_ml_fields():
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {_col} {_ddl}"))
             if "escalation_reason" not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN escalation_reason VARCHAR(200)"))
+            if "assignee" not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN assignee VARCHAR(100)"))
 
     # Notification outbox columns (real delivery status)
     if "exception_notifications" in insp.get_table_names():

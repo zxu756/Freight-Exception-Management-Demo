@@ -247,6 +247,7 @@ class RoadException(Base):
     close_evidence = Column(Text, nullable=True)
     reopen_count = Column(Integer, default=0)
     escalation_reason = Column(String(200), nullable=True)  # APR-005 审批超时升级原因
+    assignee = Column(String(100), nullable=True)  # EXC-004 责任分配：当前处理人
     created_at = Column(DateTime, default=datetime.utcnow)
 
     consignment = relationship("RoadConsignment", back_populates="exceptions")

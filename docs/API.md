@@ -949,3 +949,22 @@ risky_only=true 只返回准点率 ≤70% 且样本 ≥3 的高风险承运人�
 - 事件积压每 tick 最多处理 1000 条；重启重建 pending 堆只取 48 小时窗口；海运回填幂等改为批量集合查询——启动/时钟大跳后不再长时间卡死。
 
 *本文档与代码同仓库维护（docs/API.md）。*
+---
+
+## 16. 第三批：审计日志 / 承运商指令 / 责任分配 / 费用收口（ADM-006 · EXE-002/003 · EXC-004 · MON-006）
+
+- GET /api/world/audit?mode=&exception_id=&limit= — 审计日志（决策/处置/关闭/重开/审核/报价/指令/TMS 回写全留痕，含修改前后值与操作人）
+- POST /api/{mode}/exceptions/{id}/assign（body={assignee, by}）— 责任分配，详情返回 assignee
+- 审批通过/修改时自动生成承运商指令（drafted）；
+  GET /api/world/instructions?exception_id= ；POST /api/world/instructions/{id}/send|confirm|fail
+  confirm 记录订舱号(external_ref)/最终费用(final_cost_nzd)/新 ETA
+- GET /api/world/cost-closure?exception_id= — 费用收口：估算恢复成本 vs 批准实际成本 vs 选中报价 vs 承运商确认费用 vs SLA 违约金，含偏差值
+
+## 17. 稳定性修复（世界冻结根因）
+
+- 移除 API 写操作的 WRITE_LOCK 装饰器（线程锁 + 长 tick 组合曾导致全系统冻结）；依赖 SQLite busy_timeout 自愈；
+- 每 tick 事件处理加 20 秒时间盒 + 每 200 事件提交一次，事务窗口有界；
+- 海运启动跳过非全新库的船舶窗口回填（分块提交），缩短启动写锁占用；
+- 协调器启动时初始化维护时间戳（首个 tick 不立即跑维护）；main.py 注册 faulthandler（kill -USR1 打印线程栈诊断）。
+
+*本文档与代码同仓库维护（docs/API.md）。*
