@@ -58,12 +58,13 @@ const ExceptionDetail = () => {
   const [siblingLines, setSiblingLines] = useState<any[] | null>(null);
   const [decisionMode, setDecisionMode] = useState<'approve' | 'reject' | 'modify'>('approve');
   const [chosenAction, setChosenAction] = useState('');
-  const [decidedBy, setDecidedBy] = useState('');
   const [note, setNote] = useState('');
   const [deciding, setDeciding] = useState(false);
   const [decisionMsg, setDecisionMsg] = useState('');
   const [dispMode, setDispMode] = useState('confirmed');
   const [dispNote, setDispNote] = useState('');
+  const [users, setUsers] = useState<any[]>([]);
+  const [actor, setActor] = useState('U-ALICE');
   const [quotes, setQuotes] = useState<any[]>([]);
   const [qCarrier, setQCarrier] = useState('');
   const [qPrice, setQPrice] = useState('');
@@ -81,11 +82,14 @@ const ExceptionDetail = () => {
 
   useEffect(() => { reload(); }, [reload]);
 
-  // 报价（QTE）
+  // 报价（QTE）+ 用户（RBAC）
   useEffect(() => {
     if (!data) return;
     worldAPI.getQuotes(data.exception_id).then((d) => setQuotes(d.quotes ?? [])).catch(() => setQuotes([]));
   }, [data]);
+  useEffect(() => {
+    worldAPI.getUsers().then((d) => setUsers(d.users ?? [])).catch(() => setUsers([]));
+  }, []);
 
   const runOp = async (fn: () => Promise<unknown>, msg: string) => {
     try { await fn(); setOpMsg(msg); await reload(); }
@@ -99,7 +103,7 @@ const ExceptionDetail = () => {
     setDecisionMsg('');
     try {
       await api.decideException(exceptionId, {
-        decided_by: decidedBy.trim() || 'Coordinator',
+        user: actor,
         decision: decisionMode,
         chosen_action: decisionMode === 'reject' ? null : (chosenAction || data.recommended_action),
         note: note.trim() || undefined,
@@ -340,12 +344,14 @@ const ExceptionDetail = () => {
           ) : (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                <input
-                  value={decidedBy}
-                  onChange={(e) => setDecidedBy(e.target.value)}
-                  placeholder="决策人（默认 Coordinator）"
-                  className="text-sm px-3 py-1.5 rounded border border-gray-300 focus:border-indigo-400 focus:outline-none w-52"
-                />
+                <select
+                  value={actor}
+                  onChange={(e) => setActor(e.target.value)}
+                  className="text-sm px-3 py-1.5 rounded border border-gray-300 focus:border-indigo-400 focus:outline-none"
+                >
+                  {users.length === 0 && <option value="U-ALICE">Coordinator Alice</option>}
+                  {users.map((u) => <option key={u.user_id} value={u.user_id}>{u.name}（{u.role_label}）</option>)}
+                </select>
                 <div className="flex gap-1.5">
                   {(['approve', 'modify', 'reject'] as const).map((k) => (
                     <button
@@ -451,7 +457,7 @@ const ExceptionDetail = () => {
                   className="text-sm px-3 py-1.5 rounded border border-gray-300 w-64"
                 />
                 <button
-                  onClick={() => runOp(() => APIS[mode ?? '']!.dispositionException(exceptionId!, { disposition: dispMode, note: dispNote, by: 'Coordinator' }), '已记录处置并关闭案件')}
+                  onClick={() => runOp(() => APIS[mode ?? '']!.dispositionException(exceptionId!, { disposition: dispMode, note: dispNote, user: actor }), '已记录处置并关闭案件')}
                   className="px-3 py-1.5 rounded bg-teal-600 text-white text-sm hover:bg-teal-700"
                 >
                   记录处置并关闭
@@ -476,6 +482,9 @@ const ExceptionDetail = () => {
           {opMsg && <p className="text-xs text-gray-600 mt-2">{opMsg}</p>}
           {data.reopen_count > 0 && (
             <p className="text-[11px] text-gray-400 mt-1">已重开 {data.reopen_count} 次 · 原时间线保留</p>
+          )}
+          {data.escalation_reason && (
+            <p className="text-[11px] text-amber-600 mt-1">⚠ {data.escalation_reason}</p>
           )}
         </div>
 
@@ -547,8 +556,30 @@ const ExceptionDetail = () => {
                     {n.recipient_email
                       ? <span className="text-[11px] text-gray-500">发至 {n.recipient} · {n.recipient_email}</span>
                       : <span className="text-[11px] text-gray-500">收件人 {n.recipient}</span>}
+                    {n.review_status === 'pending_review' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">待人工审核</span>
+                    )}
+                    {n.review_status === 'rejected' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-600 font-medium">已驳回</span>
+                    )}
                   </div>
-                  {n.message}
+                  {n.edited_message ? <p className="text-gray-800">{n.edited_message}</p> : <p>{n.message}</p>}
+                  {n.review_status === 'pending_review' && (
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={() => runOp(() => worldAPI.reviewNotification(n.notification_id, { action: 'approve', user: actor }), '已批准外发')}
+                        className="px-2 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700"
+                      >
+                        批准外发
+                      </button>
+                      <button
+                        onClick={() => runOp(() => worldAPI.reviewNotification(n.notification_id, { action: 'reject', user: actor }), '已驳回')}
+                        className="px-2 py-1 rounded border border-red-300 text-red-600 text-xs hover:bg-red-50"
+                      >
+                        驳回
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

@@ -29,20 +29,22 @@ const WorldControl = () => {
   const [custFilter, setCustFilter] = useState('');
   const [carriers, setCarriers] = useState<any[]>([]);
   const [metrics, setMetrics] = useState<any[]>([]);
+  const [netEvents, setNetEvents] = useState<any[]>([]);
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [c, w, s, sh, pr, cu, cp, mt] = await Promise.all([
+      const [c, w, s, sh, pr, cu, cp, mt, ne] = await Promise.all([
         worldAPI.getClock(), worldAPI.getWeather(), worldAPI.getState(), worldAPI.getShipments(),
         worldAPI.getPredictions(), worldAPI.getCustomers(),
         worldAPI.getCarrierPerformance(true, 20), worldAPI.getMetrics(168),
+        worldAPI.getNetworkEvents(),
       ]);
       setClock(c); setRegions(w.regions ?? []); setEvents(s.active_events ?? []);
       setShipments(sh.shipments ?? []); setShipCount(sh.count ?? 0);
       setPredictions(pr.predictions ?? []); setCustomers(cu.customers ?? []);
-      setCarriers(cp.carriers ?? []); setMetrics(mt.metrics ?? []); setError(false);
+      setCarriers(cp.carriers ?? []); setMetrics(mt.metrics ?? []); setNetEvents(ne.events ?? []); setError(false);
     } catch {
       setError(true);
     }
@@ -187,6 +189,37 @@ const WorldControl = () => {
                 <div className="mt-0.5 text-[10px] text-gray-400">
                   {p.mode} · {p.reference} · {p.status === 'predicted' ? '预测中' : '已应验'}
                 </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* 网络事件编组（EVT-008）：天气/港口/线路事件 → 受影响班次与客户，可批量处置 */}
+        <section className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+              <span className="text-xl">🌐</span> 网络事件编组
+              <span className="text-xs text-gray-400">({netEvents.length} 活跃 · 批量处置影响范围内的待审通知)</span>
+            </h2>
+          </div>
+          {netEvents.length === 0 && <p className="text-sm text-gray-400">暂无活跃网络事件</p>}
+          <div className="space-y-2 max-h-[300px] overflow-y-auto">
+            {netEvents.map((e) => (
+              <div key={e.event_id} className="flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-xs text-gray-700">{e.mode} · {e.event_type} · {e.location} · {e.description}</div>
+                  <div className="text-[10px] text-gray-400">
+                    影响班次 {e.affected_movements} · 客户 {e.affected_customers} · 至 {e.ends_at.slice(5, 16).replace('T', ' ')}
+                    {e.customers?.length > 0 ? ' · ' + e.customers.slice(0, 4).join('、') : ''}
+                  </div>
+                </div>
+                <button
+                  onClick={async () => { await worldAPI.batchNotifyEvent(e.event_id, 'Coordinator'); load(); }}
+                  className="shrink-0 ml-2 px-2.5 py-1 rounded bg-sky-600 text-white text-xs hover:bg-sky-700"
+                  title="把该事件影响范围内的待审通知批量批准外发"
+                >
+                  批量批准通知
+                </button>
               </div>
             ))}
           </div>
