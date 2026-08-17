@@ -1326,7 +1326,7 @@ class AirCargoSimulator:
                 db.delete(w)
         old_flights = db.query(AirFlight).filter(
             AirFlight.status.in_(["landed", "cancelled"]),
-            AirFlight.scheduled_arrival < cutoff - timedelta(hours=24)
+            AirFlight.scheduled_arrival < cutoff - timedelta(hours=168)
         ).all()
         for f in old_flights:
             db.delete(f)

@@ -48,7 +48,7 @@ class Settings(BaseSettings):
 
     # 各方式订单量校准系数（订单总量目标 ~15-18k 票/月：陆 7k / 空 5k / 海 2.5k / 铁 2.5k）
     road_scale: float = 0.15
-    air_scale: float = 0.3
+    air_scale: float = 0.8
     sea_scale: float = 0.6
     rail_scale: float = 1.0
 
