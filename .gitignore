@@ -38,3 +38,7 @@ build/
 htmlcov/
 .coverage
 .pytest_cache/
+
+# phase1 阶段性报告（本地数据库与缓存不入库）
+phase1/backend/__pycache__/
+phase1/backend/phase1.db
