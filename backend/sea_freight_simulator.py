@@ -42,7 +42,7 @@ from anomaly_detector import detector
 from world.clock import world_clock
 
 # 活跃窗口：为 arrival 落在该窗口内的船生成集装箱
-ACTIVE_WINDOW_BEFORE_HOURS = 120   # 5 days before
+ACTIVE_WINDOW_BEFORE_HOURS = 24    # 1 day before（回填只生成最近一天历史，避免最近事件时间戳看起来陈旧）
 ACTIVE_WINDOW_AFTER_HOURS = 336    # 14 days after
 
 # 集装箱 owner code (ISO 6346 前缀)
