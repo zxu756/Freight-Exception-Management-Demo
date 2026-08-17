@@ -1,5 +1,7 @@
 # Freight Exception Management System - Interactive Demo
 
+> 📁 仓库结构：**根目录 = 最终交付物**（backend + frontend，当前开发主线）；`phase1/` 目录为早期阶段性报告存档（非最终成果）。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Demo](https://img.shields.io/badge/Status-Demo-blue.svg)]()
 

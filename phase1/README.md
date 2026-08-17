@@ -1,4 +1,8 @@
-# Phase 1 - Freight Exception Management Demo
+# Phase 1 - Freight Exception Management Demo（阶段性报告）
+
+> ⚠️ **存档说明：本目录是项目早期（Phase 1）的阶段性报告/演示副本，仅供存档与对照参考，不是最终项目成果。**
+> 最终交付物在仓库**根目录**（backend/ + frontend/，含海/空/陆/铁四方式模拟、世界内核、AI 异常流水线与 Kratos 需求闭环）。
+> 如需运行最新版本，请按根目录 README 操作，不要以本目录为准。
 
 ## Overview
 This is a simplified version of the Freight Exception Management system for Phase 1 demo.
